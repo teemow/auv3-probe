@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required for THIRD-PARTY AUv3 discovery. Without the Inter-App Audio
+	     capability, AVAudioUnitComponentManager only returns Apple's built-in
+	     Audio Units; every third-party plugin is silently hidden. Deprecated by
+	     Apple but still load-bearing for enumeration. See docs/auv3-discovery.md.
+	     Works with a free Apple ID (no paid Developer Program needed). -->
+	<key>inter-app-audio</key>
+	<true/>
+</dict>
+</plist>

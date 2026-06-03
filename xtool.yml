@@ -1,0 +1,11 @@
+version: 1
+bundleID: com.teemow.auv3probe
+# A dedicated plist for xtool: the canonical Resources/Info.plist uses XcodeGen
+# $(...) build-setting substitutions that xtool does not resolve.
+infoPath: xtool-Info.plist
+# Reuse the same entitlements as the XcodeGen build — inter-app-audio is required
+# for third-party AUv3 discovery (see docs/auv3-discovery.md).
+entitlementsPath: Resources/AUv3Probe.entitlements
+# xtool can't read Assets.xcassets, so point it straight at the 1024x1024 PNG in
+# the asset catalog (no copy needed).
+iconPath: Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png

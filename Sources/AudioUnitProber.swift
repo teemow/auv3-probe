@@ -14,7 +14,9 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
     let id: String
     let name: String
     let manufacturer: String
-    let typeName: String
+    /// The 4-char component type code (e.g. "aumu", "aufx").
+    let typeCode: String
+    let version: String
     let componentDescription: AudioComponentDescription
 
     init(component: AVAudioUnitComponent) {
@@ -22,11 +24,20 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
         self.componentDescription = desc
         self.name = component.name
         self.manufacturer = component.manufacturerName
-        self.typeName = FourCharCode.string(from: desc.componentType)
+        self.typeCode = FourCharCode.string(from: desc.componentType)
+        self.version = component.versionString
         // type/subtype/manufacturer FourCCs uniquely identify a component.
         self.id = "\(FourCharCode.string(from: desc.componentType))"
             + "/\(FourCharCode.string(from: desc.componentSubType))"
             + "/\(FourCharCode.string(from: desc.componentManufacturer))"
+    }
+
+    /// The stable id the receiver uses to name staged dumps. Mirrors
+    /// `ProbeDump.probeID` so a failed probe (which produces no dump) reports the
+    /// same id as a successful one would.
+    var probeID: String {
+        let subtype = FourCharCode.string(from: componentDescription.componentSubType)
+        return ProbeDump.sanitizeID(subtype.isEmpty ? name : subtype)
     }
 
     // AudioComponentDescription is not Hashable/Equatable, so key both off the
@@ -42,14 +53,11 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
 
 enum ProbeError: LocalizedError {
     case instantiationFailed(String)
-    case noParameterTree
 
     var errorDescription: String? {
         switch self {
         case .instantiationFailed(let why):
             return "could not instantiate audio unit: \(why)"
-        case .noParameterTree:
-            return "audio unit exposes no parameter tree"
         }
     }
 }
@@ -75,44 +83,142 @@ enum AudioUnitProber {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Instantiate `unit`, read its parameter tree, and return a ProbeDump.
+    /// Instantiate `unit`, read its parameter tree + metadata, and return a
+    /// ProbeDump. A unit with no parameter tree returns a dump with zero
+    /// parameters (it is valid diagnostic data, not an error) rather than
+    /// throwing — only a failed instantiation throws.
     static func probe(_ unit: DiscoveredAudioUnit) async throws -> ProbeDump {
         let avUnit = try await instantiate(unit.componentDescription)
         let auUnit = avUnit.auAudioUnit
-        guard let tree = auUnit.parameterTree else {
-            throw ProbeError.noParameterTree
+
+        var parameters: [ProbeParam] = []
+        if let tree = auUnit.parameterTree {
+            parameters = flatten(tree)
         }
 
-        let parameters = tree.allParameters.map(makeParam)
         let desc = unit.componentDescription
         let component = ProbeComponent(
             type: FourCharCode.string(from: desc.componentType),
             subtype: FourCharCode.string(from: desc.componentSubType),
-            manufacturer: FourCharCode.string(from: desc.componentManufacturer)
+            manufacturer: FourCharCode.string(from: desc.componentManufacturer),
+            manufacturerName: unit.manufacturer.isEmpty ? nil : unit.manufacturer,
+            version: unit.version.isEmpty ? nil : unit.version
         )
-        return ProbeDump(component: component, name: unit.name, parameters: parameters)
+
+        let presets = (auUnit.factoryPresets ?? []).map {
+            ProbePreset(number: $0.number, name: $0.name)
+        }
+        // User presets are only meaningful when the unit supports them; reading
+        // the array is safe regardless, but gate to avoid surprises on units
+        // that don't.
+        let userPresets = auUnit.supportsUserPresets
+            ? auUnit.userPresets.map { ProbePreset(number: $0.number, name: $0.name) }
+            : []
+        let shortName = auUnit.audioUnitShortName
+
+        let channelCaps = (auUnit.channelCapabilities ?? []).map { Int(truncating: $0) }
+        let latency = auUnit.latency
+        let tailTime = auUnit.tailTime
+
+        return ProbeDump(
+            component: component,
+            name: unit.name,
+            parameters: parameters,
+            shortName: (shortName?.isEmpty == false) ? shortName : nil,
+            factoryPresets: presets.isEmpty ? nil : presets,
+            userPresets: userPresets.isEmpty ? nil : userPresets,
+            channelCapabilities: channelCaps.isEmpty ? nil : channelCaps,
+            latency: latency > 0 ? latency : nil,
+            tailTime: tailTime > 0 ? tailTime : nil,
+            supportsUserPresets: auUnit.supportsUserPresets ? true : nil
+        )
+    }
+
+    /// Number of non-finite values that were sanitized in a dump (for the run
+    /// report). Counted here so the model does not re-walk the tree.
+    static func sanitizedCount(_ dump: ProbeDump) -> Int {
+        dump.parameters.reduce(0) { $0 + ($1.nonFinite != nil ? 1 : 0) }
+    }
+
+    // MARK: - Tree walking
+
+    /// Walk the parameter tree depth-first, preserving order and recording each
+    /// parameter's parent group displayName, then return a flat [ProbeParam].
+    private static func flatten(_ tree: AUParameterTree) -> [ProbeParam] {
+        var out: [ProbeParam] = []
+        walk(nodes: tree.children, group: nil, into: &out)
+        // Fallback: a tree that exposes parameters only via allParameters and
+        // not as children still gets dumped.
+        if out.isEmpty {
+            out = tree.allParameters.map { makeParam($0, group: nil) }
+        }
+        return out
+    }
+
+    private static func walk(nodes: [AUParameterNode], group: String?, into out: inout [ProbeParam]) {
+        for node in nodes {
+            if let g = node as? AUParameterGroup {
+                let name = g.displayName.isEmpty ? g.identifier : g.displayName
+                walk(nodes: g.children, group: name, into: &out)
+            } else if let p = node as? AUParameter {
+                out.append(makeParam(p, group: group))
+            }
+        }
     }
 
     // MARK: - Mapping
 
-    private static func makeParam(_ p: AUParameter) -> ProbeParam {
+    private static func makeParam(_ p: AUParameter, group: String?) -> ProbeParam {
         let flags = p.flags
         let unitName = (p.unitName?.isEmpty == false) ? p.unitName : nil
         let valueStrings = p.valueStrings?.isEmpty == false ? p.valueStrings : nil
+
+        let (minV, minNF) = finite(p.minValue)
+        let (maxV, maxNF) = finite(p.maxValue)
+        let (valV, valNF) = finite(p.value)
+        var nonFiniteNotes: [String] = []
+        if let n = minNF { nonFiniteNotes.append("min=\(n)") }
+        if let n = maxNF { nonFiniteNotes.append("max=\(n)") }
+        if let n = valNF { nonFiniteNotes.append("value=\(n)") }
+
+        let isMeta = flags.contains(.flag_IsGlobalMeta) || flags.contains(.flag_IsElementMeta)
+
+        let dependents = (p.dependentParameters ?? []).map { UInt64(truncating: $0) }
+
         return ProbeParam(
             address: UInt64(p.address),
             keyPath: p.keyPath,
             identifier: p.identifier,
             displayName: p.displayName,
-            min: Double(p.minValue),
-            max: Double(p.maxValue),
-            value: Double(p.value),
+            min: minV,
+            max: maxV,
+            value: valV,
             unit: unitString(p.unit),
             unitName: unitName,
             valueStrings: valueStrings,
             writable: flags.contains(.flag_IsWritable),
-            readable: flags.contains(.flag_IsReadable)
+            readable: flags.contains(.flag_IsReadable),
+            group: (group?.isEmpty == false) ? group : nil,
+            flags: flags.rawValue,
+            displayLogarithmic: flags.contains(.flag_DisplayLogarithmic) ? true : nil,
+            displayExponential: flags.contains(.flag_DisplayExponential) ? true : nil,
+            isHighResolution: flags.contains(.flag_IsHighResolution) ? true : nil,
+            isRampable: flags.contains(.flag_CanRamp) ? true : nil,
+            isMeta: isMeta ? true : nil,
+            dependentParameters: dependents.isEmpty ? nil : dependents,
+            nonFinite: nonFiniteNotes.isEmpty ? nil : nonFiniteNotes.joined(separator: " ")
         )
+    }
+
+    /// Map a (possibly non-finite) AUValue to a finite Double for transport.
+    /// JSON and Go's encoding/json cannot carry ±Inf / NaN, so they are clamped
+    /// to finite sentinels; the second return value names what was clamped (nil
+    /// when the value was already finite).
+    private static func finite(_ v: AUValue) -> (Double, String?) {
+        if v.isNaN { return (0, "nan") }
+        if v == .infinity { return (Double(Float.greatestFiniteMagnitude), "+inf") }
+        if v == -.infinity { return (Double(-Float.greatestFiniteMagnitude), "-inf") }
+        return (Double(v), nil)
     }
 
     private static func instantiate(_ desc: AudioComponentDescription) async throws -> AVAudioUnit {
@@ -146,6 +252,7 @@ enum AudioUnitProber {
         case .relativeSemiTones: return "relativeSemiTones"
         case .midiNoteNumber: return "midiNoteNumber"
         case .midiController: return "midiController"
+        case .midi2Controller: return "midi2Controller"
         case .decibels: return "decibels"
         case .linearGain: return "linearGain"
         case .degrees: return "degrees"
