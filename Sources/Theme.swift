@@ -173,3 +173,88 @@ struct SectionHeader: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+// MARK: - Chips & flow layout (shared by the inspectors)
+
+/// A small outlined chip — used for tags, flags, and inline markers across the
+/// inspector views. The accent both tints the text and strokes the border.
+struct SignalChip: View {
+    let text: String
+    var color: Color = Signalwave.green
+
+    var body: some View {
+        Text(text)
+            .font(Signalwave.mono(.caption2, weight: .semibold))
+            .foregroundStyle(color.opacity(0.9))
+            .padding(.vertical, 2)
+            .padding(.horizontal, 6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .stroke(color.opacity(0.45), lineWidth: 1)
+            )
+    }
+}
+
+/// A wrapping row of `SignalChip`s, backed by the flexible `WrapLayout`.
+struct FlowChips: View {
+    let chips: [String]
+    var color: Color = Signalwave.green
+
+    var body: some View {
+        WrapLayout(spacing: 6, lineSpacing: 4) {
+            ForEach(chips, id: \.self) { chip in
+                SignalChip(text: chip, color: color)
+            }
+        }
+    }
+}
+
+/// Minimal flow layout (iOS 16 `Layout`) that wraps subviews to the available
+/// width. Shared by the chip rows and the inspector summaries.
+struct WrapLayout: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var rowWidth: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var totalHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if rowWidth > 0 && rowWidth + spacing + size.width > maxWidth {
+                totalHeight += rowHeight + lineSpacing
+                totalWidth = max(totalWidth, rowWidth)
+                rowWidth = size.width
+                rowHeight = size.height
+            } else {
+                rowWidth += (rowWidth > 0 ? spacing : 0) + size.width
+                rowHeight = max(rowHeight, size.height)
+            }
+        }
+        totalHeight += rowHeight
+        totalWidth = max(totalWidth, rowWidth)
+        return CGSize(width: min(totalWidth, maxWidth), height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxWidth = bounds.width
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > bounds.minX && x - bounds.minX + size.width > maxWidth {
+                x = bounds.minX
+                y += rowHeight + lineSpacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}

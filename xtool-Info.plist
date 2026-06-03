@@ -14,5 +14,44 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.kymatica.aum.aumproj</string>
+            <key>UTTypeDescription</key>
+            <string>AUM Project</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>com.apple.binary-property-list</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>aumproj</string>
+                </array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.kymatica.aum.aum-midimap</string>
+            <key>UTTypeDescription</key>
+            <string>AUM MIDI Map</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>com.apple.binary-property-list</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>aum_midimap</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>

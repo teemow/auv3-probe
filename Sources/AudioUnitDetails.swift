@@ -1,39 +1,41 @@
 import Foundation
 
-// ProbeDump mirrors the Go device.ProbeDump / ProbeParam / ProbeComponent
-// structs in the main mcp-midi-controller repo (internal/device/auv3probe.go).
-// The JSON keys are the *only* contract between the two repos, so they are
-// pinned here with explicit CodingKeys (camelCase) even though Swift's default
-// keying would already match the property names. If the Go structs change,
-// this mirror must change with them.
+// These types describe an AUv3 audio unit (an "app"/plugin) and the details we
+// read from it: its component identity, its parameters, and its presets. They
+// mirror the Go device.ProbeDump / ProbeParam / ProbeComponent structs in the
+// main mcp-midi-controller repo (internal/device/auv3probe.go). The JSON keys
+// are the *only* contract between the two repos, so they are pinned here with
+// explicit CodingKeys (camelCase). If the Go structs change, this mirror must
+// change with them. (The Go names still say "Probe"; the Swift side names the
+// concept directly — same wire format, clearer code.)
 
-/// The AudioComponentDescription the dump came from. type/subtype/manufacturer
-/// are FourCharCode (`OSType`) values rendered as 4-character strings (e.g.
-/// "aumu", "aufx"). manufacturerName / version are human-readable extras read
-/// from `AVAudioUnitComponent` (optional; older dumps omit them).
-struct ProbeComponent: Codable, Equatable {
+/// The AudioComponentDescription identity of an audio unit. type/subtype/
+/// manufacturer are FourCharCode (`OSType`) values rendered as 4-character
+/// strings (e.g. "aumu", "aufx"). manufacturerName / version are human-readable
+/// extras read from `AVAudioUnitComponent` (optional; older records omit them).
+/// Shared with the AUM session map, where a node references the same identity.
+struct AudioUnitComponent: Codable, Equatable {
     var type: String
     var subtype: String
     var manufacturer: String
     var manufacturerName: String?
     var version: String?
     /// Human-readable component type (e.g. "Instrument", "Effect"), from
-    /// `AVAudioUnitComponent.typeName`. Optional richer metadata (added 2026-06).
+    /// `AVAudioUnitComponent.typeName`.
     var typeName: String?
     /// Component tags (e.g. "Effects", "Distortion"), from
-    /// `AVAudioUnitComponent.allTagNames` — useful for categorizing a plugin.
-    /// Optional / omitted when empty to match Go omitempty.
+    /// `AVAudioUnitComponent.allTagNames`. Omitted when empty to match Go.
     var tags: [String]?
 }
 
-/// One `AUParameter` as read from `auAudioUnit.parameterTree`.
+/// One `AUParameter` read from an audio unit's `parameterTree`.
 ///
-/// `min` / `max` / `value` are always finite: `AudioUnitProber` sanitizes the
+/// `min` / `max` / `value` are always finite: `AudioUnitScanner` sanitizes the
 /// AU's non-finite values (±Inf, NaN — common for unbounded gain / log-scaled
 /// params) to finite sentinels before this is encoded, because JSON (and Go's
 /// encoding/json) cannot represent them. `nonFinite` records when that happened
 /// so a sentinel is not mistaken for a real bound.
-struct ProbeParam: Codable, Equatable {
+struct ParameterInfo: Codable, Equatable {
     var address: UInt64
     var keyPath: String
     var identifier: String
@@ -59,7 +61,7 @@ struct ProbeParam: Codable, Equatable {
     var isMeta: Bool?
     /// Addresses of parameters derived from this one
     /// (`AUParameter.dependentParameters`); a non-empty list marks a meta/macro
-    /// control. Optional / omitted when empty to match Go omitempty.
+    /// control. Omitted when empty to match Go omitempty.
     var dependentParameters: [UInt64]?
     var nonFinite: String?
 
@@ -72,33 +74,34 @@ struct ProbeParam: Codable, Equatable {
     }
 }
 
-/// One factory preset exposed by the AudioUnit (name + number).
-struct ProbePreset: Codable, Equatable {
+/// One preset exposed by an audio unit (name + number).
+struct PresetInfo: Codable, Equatable {
     var number: Int
     var name: String
 }
 
-/// The full parameter-tree dump for one plugin.
-struct ProbeDump: Codable, Equatable {
-    var component: ProbeComponent
+/// The full detail record for one AUv3 audio unit: its identity, every
+/// parameter, and its presets. This is what the app uploads to the daemon and
+/// renders in the inspector.
+struct AudioUnitDetails: Codable, Equatable {
+    var component: AudioUnitComponent
     var name: String
-    var parameters: [ProbeParam]
+    var parameters: [ParameterInfo]
 
     // Optional richer metadata (omitted when empty to match Go omitempty).
     var shortName: String?
-    var factoryPresets: [ProbePreset]?
+    var factoryPresets: [PresetInfo]?
     /// User-saved presets (`auAudioUnit.userPresets`). Recallable by Program
     /// Change like factory presets; their names are installation-specific so
     /// they only ever land in the gitignored state dir / user config.
-    var userPresets: [ProbePreset]?
+    var userPresets: [PresetInfo]?
 
     /// Flattened `auAudioUnit.channelCapabilities` ([in, out] pairs, -1 = any).
     var channelCapabilities: [Int]?
     /// `auAudioUnit.latency` / `.tailTime` in seconds (omitted when 0).
     var latency: Double?
     var tailTime: Double?
-    /// `auAudioUnit.supportsUserPresets` (we never dump userPresets contents —
-    /// they are user/installation state, see public-vs-private rule).
+    /// `auAudioUnit.supportsUserPresets`.
     var supportsUserPresets: Bool?
 
     enum CodingKeys: String, CodingKey {
@@ -106,12 +109,11 @@ struct ProbeDump: Codable, Equatable {
         case channelCapabilities, latency, tailTime, supportsUserPresets
     }
 
-    /// Encodes the dump to stable, pretty JSON. `.sortedKeys` guarantees a
-    /// deterministic ordering so the output diffs cleanly; the receiver
-    /// re-encodes anyway, but stable output also helps the Save-to-Files path.
-    /// `.convertToString` is a defensive backstop — the prober already replaces
-    /// non-finite values with finite sentinels, but this guarantees encoding
-    /// never throws even if one slips through.
+    /// Encodes the details to stable, pretty JSON. `.sortedKeys` guarantees a
+    /// deterministic ordering so the output diffs cleanly. `.convertToString` is
+    /// a defensive backstop — the scanner already replaces non-finite values
+    /// with finite sentinels, but this guarantees encoding never throws even if
+    /// one slips through.
     func encoded() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -120,17 +122,17 @@ struct ProbeDump: Codable, Equatable {
         return try encoder.encode(self)
     }
 
-    /// The sanitized id the receiver uses to name the staged `<id>.json` file
-    /// (component subtype, falling back to the name). Mirrors device.ProbeID so
-    /// the Save-to-Files fallback produces the same filename as the receiver.
-    var probeID: String {
+    /// The sanitized id the daemon uses to name the staged `<id>.json` file
+    /// (component subtype, falling back to the name). Mirrors the Go device
+    /// ProbeID so the Save-to-Files fallback produces the same filename.
+    var fileID: String {
         let base = component.subtype.isEmpty ? name : component.subtype
-        return ProbeDump.sanitizeID(base)
+        return AudioUnitDetails.sanitizeID(base)
     }
 
     /// Lowercases and reduces a label to a filename/id-safe token: runs of
     /// non-alphanumeric characters collapse to a single underscore, with
-    /// leading/trailing underscores trimmed. Mirrors device.sanitizeName.
+    /// leading/trailing underscores trimmed. Mirrors the Go sanitizeName.
     static func sanitizeID(_ s: String) -> String {
         let lowered = s.lowercased()
         var out = ""
@@ -148,27 +150,27 @@ struct ProbeDump: Codable, Equatable {
     }
 }
 
-// MARK: - Diagnostics report
+// MARK: - Scan report
 
-// ProbeReport mirrors the Go device.ProbeReport / ProbeRunResult /
-// ProbeRunDevice structs. It is POSTed to /auv3-probe/diagnostics at the end of
-// a probe run so every outcome — including plugins that failed to instantiate
-// or had no parameter tree, which never produce a dump — is recorded on the
-// receiver rather than lost in the app UI.
+// A scan reads every selected audio unit and records the outcome of each one —
+// including units that failed to instantiate or had no parameter tree, which
+// never produce a details record. The report is POSTed to the daemon at the end
+// of a run so no outcome is lost in the UI. Mirrors the Go device.ProbeReport /
+// ProbeRunResult / ProbeRunDevice structs.
 
-/// Non-identifying device context for a run (no user-assigned device name, to
+/// Non-identifying device context for a scan (no user-assigned device name, to
 /// respect the public-repo / no-PII rule).
-struct ProbeRunDevice: Codable, Equatable {
+struct ScanDevice: Codable, Equatable {
     var model: String?
     var systemName: String?
     var systemVersion: String?
 }
 
-/// The outcome for one plugin in a probe run.
-struct ProbeRunResult: Codable, Equatable {
+/// The outcome for one audio unit in a scan.
+struct ScanResult: Codable, Equatable {
     var id: String
     var name: String
-    var component: ProbeComponent
+    var component: AudioUnitComponent
     var status: String   // "sent" | "probed" | "empty" | "failed"
     var error: String?
     var params: Int
@@ -180,12 +182,12 @@ struct ProbeRunResult: Codable, Equatable {
     }
 }
 
-/// The full diagnostic record of one probe run.
-struct ProbeReport: Codable, Equatable {
+/// The full record of one scan run.
+struct ScanReport: Codable, Equatable {
     var app: String?
     var startedAt: String?
-    var device: ProbeRunDevice?
-    var results: [ProbeRunResult]
+    var device: ScanDevice?
+    var results: [ScanResult]
 
     func encoded() throws -> Data {
         let encoder = JSONEncoder()
@@ -194,7 +196,7 @@ struct ProbeReport: Codable, Equatable {
     }
 }
 
-/// The receiver's JSON reply to a successful POST /auv3-probe/diagnostics.
+/// The daemon's JSON reply to a successful `POST /auv3-probe/diagnostics`.
 struct DiagnosticsResult: Decodable {
     let total: Int
     let sent: Int

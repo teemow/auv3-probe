@@ -8,7 +8,7 @@ can reach *inside* iOS and AUM, where the laptop and the pedals cannot.
 `mcp-midi-controller` is the **orchestrator** (laptop, design-time). Around it:
 
 - **auv3-probe** (this app) — the **iPad node**: sees the installed AUv3
-  plugins, the AUM sessions, and eventually runs *inside* AUM itself.
+  audio units, the AUM sessions, and eventually runs *inside* AUM itself.
 - **[ble-midi-footswitch](https://github.com/teemow/ble-midi-footswitch)**
   ("threefoot") — the **intelligence on the pedalboard**: a standalone, offline
   scene/song player.
@@ -17,28 +17,29 @@ can reach *inside* iOS and AUM, where the laptop and the pedals cannot.
 
 ## What it does (and will do)
 
-Today it enumerates the **AUv3 plugins/synths** installed on the iPad (or
-iPhone), dumps each one's `AUParameterTree`, and sends the result as JSON to the
-LAN probe receiver in mcp-midi-controller. That output turns the "convention we
-invented" parameter tables for AUv3 plugins into **measured** tables (full
-parameter list, real ranges/units/`valueStrings`, and writable/readable flags),
-which feed the device-authoring tools.
+Today it enumerates the **AUv3 audio units** (instruments/effects) installed on
+the iPad (or iPhone), reads each one's `AUParameterTree`, and sends the result as
+JSON to the LAN receiver in mcp-midi-controller. That output turns the
+"convention we invented" parameter tables for AUv3 units into **measured** tables
+(full parameter list, real ranges/units/`valueStrings`, and writable/readable
+flags), which feed the device-authoring tools. It also ferries **AUM sessions**
+(`.aumproj`) to and from the orchestrator.
 
 Its remit is growing into the iPad's permanent role in the rig:
 
-1. **Probe AUv3 plugins** — enumerate + dump parameter trees (shipping today;
+1. **Read AUv3 audio units** — enumerate + read parameter/preset trees (shipping;
    the rest of this README documents it).
-2. **Read/write AUM projects** — move `.aumproj` sessions on/off the device over
-   the LAN so the orchestrator's Go `internal/aum` library can read, diff, and
-   author them. The iPad owns the file I/O; the laptop owns the format.
+2. **Read/write AUM sessions** — move `.aumproj` files on/off the device over the
+   LAN so the orchestrator's Go `internal/aum` library can read, diff, and author
+   them (shipping). The iPad owns the file I/O; the laptop owns the format.
 3. **Run inside AUM** — ship as an AUv3 extension so the app lives *in* the host,
    not just beside it.
 4. **Assist "threefoot"** — help the pedalboard footswitch load scenes or songs.
 
 ## What it produces
 
-One `ProbeDump` JSON document per plugin, matching the schema consumed by the
-`import_auv3_probe` MCP tool in the main repo:
+One `AudioUnitDetails` JSON document per audio unit, matching the schema consumed
+by the `import_auv3_probe` MCP tool in the main repo:
 
 ```json
 {
@@ -60,25 +61,26 @@ One `ProbeDump` JSON document per plugin, matching the schema consumed by the
 }
 ```
 
-Dumps also carry richer optional metadata: `component.manufacturerName` /
+Records also carry richer optional metadata: `component.manufacturerName` /
 `version`, `shortName`, `factoryPresets`, and per-parameter `group`, `flags`,
 and decoded flags (`displayLogarithmic`, `isHighResolution`, …). `min`/`max`/
 `value` are always finite — AU `±Inf`/`NaN` values are clamped and noted in
-`nonFinite`. See [docs/design.md](docs/design.md#schema-contract-probedump) for
-the full schema.
+`nonFinite`. See
+[docs/design.md](docs/design.md#schema-contract-audiounitdetails) for the full
+schema.
 
-The JSON keys are pinned to the Go `ProbeDump` / `ProbeParam` structs in the
-main repo. If those structs change, this app's `ProbeDump.swift` must change
-with them — the schema is a small `Codable` mirror, deliberately duplicated
-because the two repos are independent.
+The JSON keys are pinned to the Go `device.ProbeDump` / `device.ProbeParam`
+structs in the main repo. If those structs change, this app's
+`AudioUnitDetails.swift` must change with them — the schema is a small `Codable`
+mirror, deliberately duplicated because the two repos are independent.
 
-At the end of a run the app also POSTs a **diagnostics report** to
+At the end of a run the app also POSTs a **scan report** to
 `/auv3-probe/diagnostics` recording every outcome (sent / empty / failed), so
-plugins that fail to instantiate — which never produce a dump — are still
-recorded on the receiver instead of being lost in the app UI. The receiver
-stores it under `_diagnostics/<timestamp>.json`.
+units that fail to instantiate — which never produce details — are still recorded
+on the receiver instead of being lost in the app UI. The receiver stores it under
+`_diagnostics/<timestamp>.json`.
 
-## Discovering third-party plugins
+## Discovering third-party audio units
 
 The app declares the **Inter-App Audio** capability (`inter-app-audio` in
 `Resources/AUv3Probe.entitlements`). This is **required**: without it
@@ -132,9 +134,51 @@ this assumes (Swift toolchain ⇄ SDK version matching, `xtool sdk install`,
    allow it (the app POSTs over the LAN).
 3. Enter the receiver's `host:port` in the app (it is **not** committed anywhere
    — you type it at runtime), tap **Test connection** (hits `/healthz`).
-4. Select the plugins to probe and tap **Probe & Send**. Each dump is POSTed to
-   `/auv3-probe`. If the receiver is unreachable, use **Save to Files** to export
-   the JSON for manual transfer.
+4. Select the audio units to read and tap **Read & Send**. Each record is POSTed
+   to `/auv3-probe`. If the receiver is unreachable, use **Save to Files** to
+   export the JSON for manual transfer.
+
+## Reading AUM sessions
+
+The **aum sessions** tab reads AUM project files (`.aumproj`) and standalone MIDI
+mappings (`.aum_midimap`) **entirely on-device — no daemon required**. The app
+decodes the NSKeyedArchiver binary plist itself (`Sources/BinaryPlist.swift` +
+`Sources/AUMSessionParser.swift`, a read-only Swift port of the Go
+`internal/aum` library in
+[mcp-midi-controller](https://github.com/teemow/mcp-midi-controller)) and renders
+the parsed structure — version, tempo, channels, plugin nodes (with their AUv3
+component identity) and assigned MIDI mappings.
+
+List and inspect your sessions:
+
+- **Linked folder**: tap **link aum folder** once and pick AUM's own folder (e.g.
+  *On My iPad/AUM*). The app stores a **security-scoped bookmark** and lists every
+  `.aumproj` / `.aum_midimap` in it. Tap any row to parse it locally and open the
+  inspector.
+- **Open file**: tap **open file** to pick any session/mapping and inspect it,
+  without linking a folder.
+
+iOS has no entitlement that grants blanket access to another app's documents, so
+the user-driven picker or the one-time folder bookmark is the only sanctioned
+path. The bookmark is stored on-device only.
+
+### Optional: the daemon ferry
+
+When a daemon `host:port` is configured in the top bar (and **Test connection**
+passes), an optional ferry appears:
+
+- **Upload** device sessions to the daemon (`POST /aum-session`, verbatim bytes)
+  — per file or **upload all** from the linked folder.
+- **Daemon files**: pull daemon-generated files back into AUM. With a folder
+  linked they are written **straight into it**; otherwise the **share sheet**
+  opens ("Open in AUM" / "Save to Files…").
+
+The ferry is purely additive — listing and inspecting always work offline.
+
+> **Privacy.** Session files carry installation-specific data (song/channel
+> names). They are parsed and shown on-device; when the ferry is used they travel
+> only between the device and your own LAN daemon. The app never logs or commits
+> filenames, paths, or hostnames.
 
 ## CI
 

@@ -1,17 +1,17 @@
-# How AUv3 discovery works (and why third-party plugins go missing)
+# How AUv3 discovery works (and why third-party units go missing)
 
 This app enumerates installed Audio Units with
 `AVAudioUnitComponentManager.shared().components(...)`, filtered to the
 component types we care about (`aumu` instruments, `aufx` effects, `aumf`
 music effects). For each match it instantiates the unit, walks its
-`AUParameterTree`, and emits a `ProbeDump`.
+`AUParameterTree`, and emits an `AudioUnitDetails`.
 
 ## Enumeration is instance-independent
 
-A plugin's parameter tree is a property of the component, not of a particular
-instance: any instance of a plugin exposes the same tree the host (e.g. AUM)
-would see. So the prober instantiates a throwaway instance purely to read the
-tree, then discards it — no audio engine, no rendering, no I/O.
+An audio unit's parameter tree is a property of the component, not of a
+particular instance: any instance exposes the same tree the host (e.g. AUM)
+would see. So `AudioUnitScanner` instantiates a throwaway instance purely to read
+the tree, then discards it — no audio engine, no rendering, no I/O.
 
 ## The Inter-App Audio gotcha (the important one)
 
