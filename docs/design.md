@@ -174,21 +174,29 @@ Save-to-Files button works immediately after inspecting.
 The **inspector overlay** (`ProbeInspectorView`, a signalwave-styled `.sheet`)
 is a read-only "no obfuscation" view of a single `ProbeDump`:
 
-- **Header** — `name` + `shortName`, the FourCC `type/subtype/manufacturer`,
-  `manufacturerName`, and `version`.
-- **Summary** — the at-a-glance "what gets sent": parameter count, writable
-  count, non-finite (sanitized) count, factory/user preset counts, channel
-  capabilities, latency/tail time, and whether user presets are supported.
+- **Header** — `name` + `shortName`, then the human `typeName` ·
+  `manufacturerName` · `version`, and `tags` as chips. (The raw FourCC
+  `type/subtype/manufacturer` codes are not repeated in the header — they remain
+  in the raw JSON.)
+- **Summary** — one compact element: a wrapped line of totals (parameter /
+  writable / non-finite counts, channel capabilities, latency/tail time,
+  user-preset support) above a row of **tappable chips**. The chips are the
+  per-`group` breakdown (`chorus (8)`, `echo (8)`…) plus the `factory` / `user`
+  preset counts; tapping one **isolates** that group (or preset list) below.
+  The highlighted chip *is* the active filter — tap it again to clear — so there
+  is no separate banner.
 - **Privacy note** — flags that `userPresets` names are installation-specific
   and only leave the device when sent to the user's own LAN receiver, consistent
   with the public-repo rule.
 - **Parameters** — a `LazyVStack` sectioned by `group` (ungrouped params last),
-  with an in-sheet filter. Each row shows displayName/keyPath, `min–max`, current
-  `value`, `unit`(+`unitName`), `[w]`/`[r]` access badges, flag chips
+  with an in-sheet text filter that combines with any group isolation. Each row
+  shows displayName/keyPath, `min–max`, current `value`, `unit`(+`unitName`),
+  `[w]`/`[r]` access badges, flag chips
   (`log`/`exp`/`hi-res`/`ramp`/`meta`/`deps:N`), a non-finite marker, and the raw
   `address`/`flags`. `valueStrings` stay collapsed behind a count
   (`indexed · N values`) and only render when tapped.
-- **Presets** — factory and user lists (user clearly labelled on-device only).
+- **Presets** — factory and user lists (user clearly labelled on-device only),
+  honouring a preset isolation set from the summary.
 - **Raw JSON** — a collapsible section rendering `try dump.encoded()` (the exact
   bytes that would be POSTed), encoded only when revealed.
 
@@ -275,7 +283,8 @@ One document per plugin. Keys are pinned to the Go structs consumed by
 {
   "component": {
     "type": "aumu", "subtype": "iSEM", "manufacturer": "Artu",
-    "manufacturerName": "Arturia", "version": "1.2.0"
+    "manufacturerName": "Arturia", "version": "1.2.0",
+    "typeName": "Instrument", "tags": ["Synthesizer", "Effects"]
   },
   "name": "Arturia iSEM",
   "shortName": "iSEM",
@@ -301,12 +310,21 @@ One document per plugin. Keys are pinned to the Go structs consumed by
 ```
 
 - `component.type/subtype/manufacturer` are `FourCharCode` (`OSType`) values
-  rendered as 4-character strings (non-printable bytes → `?`).
-- `component.manufacturerName` / `version`, `shortName`, `factoryPresets`, and
-  the per-param `group` / `flags` / `displayLogarithmic` / `displayExponential`
-  / `isHighResolution` / `isRampable` / `isMeta` / `nonFinite` fields are
-  **optional richer metadata** (added 2026-06). They are omitted when empty and
-  decode to the zero value on the Go side, so older dumps stay valid.
+  rendered as 4-character strings (non-printable bytes → `?`). Only `type` is a
+  fixed Apple constant (`aumu` instrument / `aufx` effect / `aumf` music effect);
+  `subtype` and `manufacturer` are vendor-chosen identifiers.
+- `component.typeName` (human label, e.g. "Instrument") and `component.tags`
+  (e.g. `["Distortion"]`, from `AVAudioUnitComponent.allTagNames`) are
+  agent-facing categorization hints. App description / developer bio / changelog
+  are **not** available — they are App Store metadata that no iOS API exposes to
+  a third-party app, so they are deliberately absent from the contract.
+- `component.manufacturerName` / `version` / `typeName` / `tags`, `shortName`,
+  `factoryPresets`, and the per-param `group` / `flags` / `displayLogarithmic` /
+  `displayExponential` / `isHighResolution` / `isRampable` / `isMeta` /
+  `nonFinite` fields are **optional richer metadata** (added 2026-06). They are
+  omitted when empty and decode to the zero value on the Go side, so older dumps
+  stay valid. (`typeName` / `tags` need matching fields added to the Go
+  `device.ProbeComponent` to be consumed by `import_auv3_probe`.)
 - `min` / `max` / `value` are **always finite**. AU non-finite values
   (`±Inf`/`NaN`) are clamped to finite sentinels before encoding and the fact is
   recorded in `nonFinite` (e.g. `"max=+inf"`); the Swift encoder also sets

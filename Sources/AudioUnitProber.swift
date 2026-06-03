@@ -16,6 +16,10 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
     let manufacturer: String
     /// The 4-char component type code (e.g. "aumu", "aufx").
     let typeCode: String
+    /// Human-readable type label (e.g. "Instrument", "Effect").
+    let typeName: String
+    /// Component tags (e.g. "Effects", "Distortion") for categorization.
+    let tags: [String]
     let version: String
     let componentDescription: AudioComponentDescription
 
@@ -25,6 +29,8 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
         self.name = component.name
         self.manufacturer = component.manufacturerName
         self.typeCode = FourCharCode.string(from: desc.componentType)
+        self.typeName = component.typeName
+        self.tags = component.allTagNames
         self.version = component.versionString
         // type/subtype/manufacturer FourCCs uniquely identify a component.
         self.id = "\(FourCharCode.string(from: desc.componentType))"
@@ -102,7 +108,9 @@ enum AudioUnitProber {
             subtype: FourCharCode.string(from: desc.componentSubType),
             manufacturer: FourCharCode.string(from: desc.componentManufacturer),
             manufacturerName: unit.manufacturer.isEmpty ? nil : unit.manufacturer,
-            version: unit.version.isEmpty ? nil : unit.version
+            version: unit.version.isEmpty ? nil : unit.version,
+            typeName: unit.typeName.isEmpty ? nil : unit.typeName,
+            tags: unit.tags.isEmpty ? nil : unit.tags
         )
 
         let presets = (auUnit.factoryPresets ?? []).map {
