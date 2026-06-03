@@ -14,6 +14,10 @@ xcuserdata/
 
 # Swift Package Manager
 .swiftpm/
+Package.resolved
+
+# xtool (Linux build/sign/install) output — see docs/building-on-linux.md
+xtool/
 
 # macOS
 .DS_Store

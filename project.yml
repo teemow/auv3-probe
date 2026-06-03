@@ -3,7 +3,7 @@ name: AUv3Probe
 options:
   bundleIdPrefix: com.teemow
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"
   createIntermediateGroups: true
 
 settings:
@@ -17,7 +17,7 @@ targets:
   AUv3Probe:
     type: application
     platform: iOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "16.0"
     sources:
       - Sources
       - Resources
@@ -25,5 +25,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe
         INFOPLIST_FILE: Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Inter-App Audio capability — required for third-party AUv3 discovery
+        # (see Resources/AUv3Probe.entitlements and docs/auv3-discovery.md).
+        CODE_SIGN_ENTITLEMENTS: Resources/AUv3Probe.entitlements
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_USER_SCRIPT_SANDBOXING: YES

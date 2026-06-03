@@ -2,10 +2,12 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-// ProbeSender ships a ProbeDump to the cmd/auv3-probe LAN receiver in the main
-// repo: POST /auv3-probe with the JSON body, GET /healthz to test connectivity
-// first. When the receiver is unreachable, ProbeJSONDocument backs a
-// Save-to-Files fallback so the dump can be transferred manually.
+// ProbeSender ships data to the auv3-probe LAN receiver in the main repo:
+//   POST /auv3-probe              — one plugin's ProbeDump
+//   POST /auv3-probe/diagnostics  — the full run report (incl. failures)
+//   GET  /healthz                 — connectivity test, run first
+// When the receiver is unreachable, ProbeJSONDocument backs a Save-to-Files
+// fallback so a dump can be transferred manually.
 
 /// The receiver's JSON reply to a successful POST /auv3-probe.
 struct ProbeSendResult: Decodable {
@@ -74,19 +76,31 @@ struct ProbeSender {
 
     /// `POST /auv3-probe` with the encoded dump; returns the receiver's summary.
     func send(_ dump: ProbeDump) async throws -> ProbeSendResult {
-        let url = baseURL.appendingPathComponent("auv3-probe")
+        let data = try await post(path: "auv3-probe", body: dump.encoded())
+        return try JSONDecoder().decode(ProbeSendResult.self, from: data)
+    }
+
+    /// `POST /auv3-probe/diagnostics` with the full run report (incl. failures);
+    /// returns the receiver's per-status tally.
+    func sendReport(_ report: ProbeReport) async throws -> DiagnosticsResult {
+        let data = try await post(path: "auv3-probe/diagnostics", body: report.encoded())
+        return try JSONDecoder().decode(DiagnosticsResult.self, from: data)
+    }
+
+    private func post(path: String, body: Data) async throws -> Data {
+        let url = baseURL.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
-        request.httpBody = try dump.encoded()
+        request.httpBody = body
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             throw SenderError.notOK(code, String(data: data, encoding: .utf8) ?? "")
         }
-        return try JSONDecoder().decode(ProbeSendResult.self, from: data)
+        return data
     }
 }
 
