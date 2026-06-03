@@ -145,14 +145,67 @@ receiver would have written.
 receiver host field (persisted across launches in `UserDefaults`), search/filter,
 per-row probe/send status, multi-select, a run summary, and the export fallback.
 
+### Inspect-before-send (tap-to-inspect)
+
+Sending is a deliberate, batch action — but the user can review exactly what
+*would* be sent for any single plugin, on the device, before any data leaves it.
+Each plugin row has two distinct tap targets:
+
+- **Arm** — tapping the `[x]`/`[ ]` checkbox or the left signal bar toggles the
+  row's batch selection (used by the bottom **probe & send** action). Unchanged
+  from the send-only workflow.
+- **Inspect** — tapping the plugin **name/body** (or the row's `chevron`
+  affordance) runs `ProbeModel.inspect(_:)`: it probes that **one** plugin
+  locally via the same `AudioUnitProber.probe(_:)` path the batch send uses,
+  stashes the dump, and opens the **inspector overlay**. No data is sent.
+
+```mermaid
+flowchart LR
+  row["plugin row"] -->|"tap [x] / signal bar"| arm["toggle armed (batch select)"]
+  row -->|"tap name / chevron"| probeOne["probe this one (local, no send)"]
+  probeOne --> sheet["inspector overlay (sheet)"]
+  arm --> batch["action bar: probe & send N"]
+```
+
+Because inspect reuses the exact probe path, **what you inspect equals what you
+would send** — byte-identical. The dump is stashed too, so the per-row
+Save-to-Files button works immediately after inspecting.
+
+The **inspector overlay** (`ProbeInspectorView`, a signalwave-styled `.sheet`)
+is a read-only "no obfuscation" view of a single `ProbeDump`:
+
+- **Header** — `name` + `shortName`, the FourCC `type/subtype/manufacturer`,
+  `manufacturerName`, and `version`.
+- **Summary** — the at-a-glance "what gets sent": parameter count, writable
+  count, non-finite (sanitized) count, factory/user preset counts, channel
+  capabilities, latency/tail time, and whether user presets are supported.
+- **Privacy note** — flags that `userPresets` names are installation-specific
+  and only leave the device when sent to the user's own LAN receiver, consistent
+  with the public-repo rule.
+- **Parameters** — a `LazyVStack` sectioned by `group` (ungrouped params last),
+  with an in-sheet filter. Each row shows displayName/keyPath, `min–max`, current
+  `value`, `unit`(+`unitName`), `[w]`/`[r]` access badges, flag chips
+  (`log`/`exp`/`hi-res`/`ramp`/`meta`/`deps:N`), a non-finite marker, and the raw
+  `address`/`flags`. `valueStrings` stay collapsed behind a count
+  (`indexed · N values`) and only render when tapped.
+- **Presets** — factory and user lists (user clearly labelled on-device only).
+- **Raw JSON** — a collapsible section rendering `try dump.encoded()` (the exact
+  bytes that would be POSTed), encoded only when revealed.
+
+Real dumps span 0 params up to thousands (one file is ~1.8 MB with very long
+`valueStrings`), so the inspector renders lazily, keeps big `valueStrings`
+collapsed, and defers raw-JSON encoding behind its disclosure to stay responsive
+on the worst case.
+
 ## Source layout
 
 | File | Role |
 |------|------|
 | `Sources/AUv3ProbeApp.swift` | `@main` SwiftUI `App` entry point. |
-| `Sources/ContentView.swift` | Single-screen **signalwave** "sniffer console" (hand-built, not a system `Form`): wordmark header + rescan, receiver host + test, an inline plugin filter, a capture-style multi-select list, a fixed bottom action bar (Probe & Send + run summary), per-row Save-to-Files. |
+| `Sources/ContentView.swift` | Single-screen **signalwave** "sniffer console" (hand-built, not a system `Form`): wordmark header + rescan, receiver host + test, an inline plugin filter, a capture-style multi-select list with split arm/inspect tap targets, a fixed bottom action bar (Probe & Send + run summary), per-row Save-to-Files, and the inspector `.sheet`. |
+| `Sources/ProbeInspectorView.swift` | The **tap-to-inspect** overlay: a read-only signalwave `.sheet` rendering one `ProbeDump` (header, summary, privacy note, group-sectioned lazy parameter list, presets, raw JSON) — the exact bytes a batch send would POST. |
 | `Sources/Theme.swift` | The signalwave design system in SwiftUI: palette (`Signalwave.*`), monospaced fonts, the wave/probe `WaveGlyph`, primary/ghost button styles, field + section-header surfaces. |
-| `Sources/ProbeModel.swift` | `ObservableObject` state + orchestration (discover, test, probe, send, export). |
+| `Sources/ProbeModel.swift` | `ObservableObject` state + orchestration (discover, test, probe single/batch, send, inspect, export). |
 | `Sources/AudioUnitProber.swift` | AUv3 enumeration + `AUParameterTree` → `ProbeDump` mapping; `FourCharCode` ↔ string; unit-enum rendering. |
 | `Sources/ProbeSender.swift` | LAN client (`POST /auv3-probe`, `GET /healthz`) + `ProbeJSONDocument` for Save-to-Files. |
 | `Sources/ProbeDump.swift` | The cross-repo JSON schema mirror (`ProbeDump` / `ProbeParam` / `ProbeComponent`) + `probeID` / `sanitizeID`. |
@@ -202,6 +255,12 @@ per-row probe/send status, multi-select, a run summary, and the export fallback.
   obfuscation". The palette/fonts/components live in `Sources/Theme.swift`, built
   only from primitives available on the iOS 16 deployment floor (no iOS 26-only
   APIs), so no SDK gating is needed.
+- **Inspect equals send; send stays a batch action.** Tapping a plugin name
+  probes that one plugin through the *same* `AudioUnitProber.probe(_:)` path the
+  batch send uses, so the inspector shows byte-identical data to what would be
+  POSTed — "no obfuscation" holds literally, down to the raw JSON. The inspector
+  is read-only review only; sending remains the explicit bottom **probe & send**
+  action, so reviewing data never sends it by accident.
 - **Open-loop by design.** Because AUM emits no parameter→MIDI feedback, live
   control of AUM-hosted plugins is open-loop; verification moves to *authoring
   time* (this probe), not every scene recall. This is a deliberate posture, not

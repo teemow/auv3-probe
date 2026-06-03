@@ -100,6 +100,25 @@ glyph, and components live in `Sources/Theme.swift`; the screen itself is
 `Sources/ContentView.swift`. A console/matrix patch-bay layout (rows = hardware,
 columns = scanned hosts) remains a future step.
 
+### Tap to inspect — the per-plugin sniffer view
+
+The "sniffer console that exposes what each plugin broadcasts" is realized by the
+**inspector overlay** (`Sources/ProbeInspectorView.swift`). Each row in the
+capture list now has two tap targets: the `[x]`/`[ ]` checkbox and left signal
+bar **arm** the row for batch send (unchanged), while tapping the plugin
+**name/body** — marked by a `chevron` affordance — probes that one plugin locally
+and opens the overlay. Nothing is sent; it is read-only review.
+
+The overlay is the same signalwave language carried into a `.sheet` (charcoal
+field, mono lowercase chrome, green accent, slate hairlines, hard edges): a
+header with identity + FourCC, an at-a-glance summary of what gets sent, a
+group-sectioned parameter list with `[w]`/`[r]` badges and flag chips, factory/
+user presets, and the literal **raw json** behind a disclosure. It is the most
+direct expression of the **no-obfuscation** principle — you see the exact bytes a
+send would POST, on the device, before sending. Long `valueStrings` and the raw
+JSON stay collapsed so even the worst-case dump (~1.8 MB, thousands of params)
+stays responsive.
+
 ## See also
 
 - [design.md](design.md) — architecture and data flow.
