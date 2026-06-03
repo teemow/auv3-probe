@@ -302,9 +302,13 @@ struct ContentView: View {
         .background(isSelected ? Signalwave.surface : Color.clear)
         .overlay(alignment: .leading) {
             // A left signal bar marks an armed row; tapping it also toggles arm.
+            // The bar stays a 2pt hairline, but the hit area widens to fill the
+            // left padding so it is comfortably tappable without overlapping the
+            // checkbox (which starts after the row's 12pt padding).
             Rectangle()
                 .fill(isSelected ? Signalwave.green : Color.clear)
                 .frame(width: 2)
+                .frame(width: 10, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { model.toggle(unit.id) }
         }

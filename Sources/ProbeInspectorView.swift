@@ -16,7 +16,6 @@ struct ProbeInspectorView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
-    @State private var showRaw = false
 
     var body: some View {
         ZStack {
@@ -33,7 +32,7 @@ struct ProbeInspectorView: View {
                         privacyNote
                         parameters
                         presets
-                        rawJSON
+                        RawJSONSection(dump: dump)
                     }
                     .padding(16)
                     .padding(.bottom, 24)
@@ -183,13 +182,13 @@ struct ProbeInspectorView: View {
         }
     }
 
-    /// Parameters grouped by `group`, preserving first-appearance order; params
+    /// Groups `params` by `group`, preserving first-appearance order; params
     /// with no group fall under a single "ungrouped" bucket appended last.
-    private var groupedParameters: [(name: String, params: [ProbeParam])] {
+    private func grouped(_ params: [ProbeParam]) -> [(name: String, params: [ProbeParam])] {
         var order: [String] = []
         var buckets: [String: [ProbeParam]] = [:]
         let ungrouped = "ungrouped"
-        for p in filteredParameters {
+        for p in params {
             let key = (p.group?.isEmpty == false) ? p.group! : ungrouped
             if buckets[key] == nil { order.append(key) }
             buckets[key, default: []].append(p)
@@ -205,6 +204,12 @@ struct ProbeInspectorView: View {
 
     @ViewBuilder
     private var parameters: some View {
+        // Filter + group once per render: the worst-case dump has thousands of
+        // params, so the result is reused by both the content and the header
+        // count rather than recomputed for each.
+        let filtered = filteredParameters
+        let groups = grouped(filtered)
+
         Section {
             if dump.parameters.isEmpty {
                 Text("// no parameters exposed by this plugin")
@@ -214,13 +219,13 @@ struct ProbeInspectorView: View {
             } else {
                 paramFilterField
 
-                if filteredParameters.isEmpty {
+                if filtered.isEmpty {
                     Text("// no parameters match “\(query)”")
                         .font(Signalwave.mono(.caption))
                         .foregroundStyle(Signalwave.dim)
                         .padding(.top, 4)
                 } else {
-                    ForEach(groupedParameters, id: \.name) { group in
+                    ForEach(groups, id: \.name) { group in
                         paramGroup(group.name, params: group.params)
                     }
                 }
@@ -229,7 +234,7 @@ struct ProbeInspectorView: View {
             HStack(spacing: 8) {
                 SectionHeader("parameters")
                 Spacer()
-                Text("\(filteredParameters.count)/\(dump.parameters.count)")
+                Text("\(filtered.count)/\(dump.parameters.count)")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
             }
@@ -344,52 +349,6 @@ struct ProbeInspectorView: View {
         }
     }
 
-    // MARK: - Raw JSON
-
-    @ViewBuilder
-    private var rawJSON: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {
-                showRaw.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: showRaw ? "chevron.down" : "chevron.right")
-                    SectionHeader("raw json")
-                    Spacer()
-                    Text(showRaw ? "hide" : "show")
-                        .font(Signalwave.mono(.caption2))
-                        .foregroundStyle(Signalwave.dim)
-                }
-            }
-            .buttonStyle(.plain)
-
-            if showRaw {
-                // Encode only when revealed: the worst-case dump is ~1.8 MB.
-                Text(rawJSONString)
-                    .font(Signalwave.mono(.caption2))
-                    .foregroundStyle(Signalwave.fg)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(Signalwave.surface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .stroke(Signalwave.grid, lineWidth: 1)
-                    )
-            }
-        }
-    }
-
-    private var rawJSONString: String {
-        guard let data = try? dump.encoded() else {
-            return "// failed to encode dump"
-        }
-        return String(decoding: data, as: UTF8.self)
-    }
-
     // MARK: - Formatting helpers
 
     /// Renders a Double tersely: integral values lose their ".0", others keep up
@@ -417,6 +376,60 @@ struct ProbeInspectorView: View {
         }
         if i < caps.count { pairs.append(token(caps[i])) }
         return pairs.joined(separator: ", ")
+    }
+}
+
+// MARK: - Raw JSON
+
+/// The collapsible "raw json" section, isolated into its own view so toggling it
+/// open/closed only re-renders this subtree — not the parent's filtered/grouped
+/// parameter list (which is O(params) and costly on the ~1.8 MB worst case). The
+/// dump is encoded only when revealed.
+private struct RawJSONSection: View {
+    let dump: ProbeDump
+
+    @State private var showRaw = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                showRaw.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: showRaw ? "chevron.down" : "chevron.right")
+                    SectionHeader("raw json")
+                    Spacer()
+                    Text(showRaw ? "hide" : "show")
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if showRaw {
+                Text(rawJSONString)
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.fg)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Signalwave.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(Signalwave.grid, lineWidth: 1)
+                    )
+            }
+        }
+    }
+
+    private var rawJSONString: String {
+        guard let data = try? dump.encoded() else {
+            return "// failed to encode dump"
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 
