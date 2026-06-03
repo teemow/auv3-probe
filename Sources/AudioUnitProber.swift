@@ -28,6 +28,16 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
             + "/\(FourCharCode.string(from: desc.componentSubType))"
             + "/\(FourCharCode.string(from: desc.componentManufacturer))"
     }
+
+    // AudioComponentDescription is not Hashable/Equatable, so key both off the
+    // already-unique component id rather than synthesizing over all fields.
+    static func == (lhs: DiscoveredAudioUnit, rhs: DiscoveredAudioUnit) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
 }
 
 enum ProbeError: LocalizedError {
