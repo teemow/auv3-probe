@@ -53,6 +53,22 @@ struct ContentView: View {
             contentType: .json,
             defaultFilename: model.exportFilename
         ) { _ in }
+        .sheet(item: inspectedBinding) { item in
+            ProbeInspectorView(dump: item.dump)
+        }
+    }
+
+    /// Bridges `model.inspectedID` (a plain id) to a `.sheet(item:)` binding by
+    /// pairing it with its stashed dump; clearing the binding dismisses the
+    /// sheet by nilling `inspectedID`.
+    private var inspectedBinding: Binding<InspectedPlugin?> {
+        Binding(
+            get: {
+                guard let id = model.inspectedID, let dump = model.dump(id) else { return nil }
+                return InspectedPlugin(id: id, dump: dump)
+            },
+            set: { newValue in model.inspectedID = newValue?.id }
+        )
     }
 
     // MARK: - Header / wordmark
@@ -223,24 +239,49 @@ struct ContentView: View {
         let isSelected = model.selected.contains(unit.id)
 
         HStack(alignment: .top, spacing: 12) {
+            // Arming target: the checkbox + left signal bar toggle batch select.
             // The probe-armed marker reads like a checkbox in a capture list.
-            Text(isSelected ? "[x]" : "[ ]")
-                .font(Signalwave.mono(.body, weight: .bold))
-                .foregroundStyle(isSelected ? Signalwave.green : Signalwave.dim)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(unit.name)
-                    .font(Signalwave.mono(.body))
-                    .foregroundStyle(Signalwave.fg)
-                Text(subtitle(unit))
-                    .font(Signalwave.mono(.caption))
-                    .foregroundStyle(Signalwave.dim)
-                if !status.text.isEmpty {
-                    statusLabel(status)
-                }
+            Button {
+                model.toggle(unit.id)
+            } label: {
+                Text(isSelected ? "[x]" : "[ ]")
+                    .font(Signalwave.mono(.body, weight: .bold))
+                    .foregroundStyle(isSelected ? Signalwave.green : Signalwave.dim)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isSelected ? "disarm \(unit.name)" : "arm \(unit.name)")
 
-            Spacer(minLength: 8)
+            // Inspect target: tapping the name/body probes this one locally
+            // (no send) and opens the inspector overlay.
+            Button {
+                Task { await model.inspect(unit) }
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(unit.name)
+                            .font(Signalwave.mono(.body))
+                            .foregroundStyle(Signalwave.fg)
+                        Text(subtitle(unit))
+                            .font(Signalwave.mono(.caption))
+                            .foregroundStyle(Signalwave.dim)
+                        if !status.text.isEmpty {
+                            statusLabel(status)
+                        }
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(Signalwave.dim)
+                        .padding(.top, 2)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("inspect \(unit.name)")
+            .accessibilityHint("probes locally and shows what would be sent")
 
             if status.isWorking {
                 ProgressView()
@@ -260,13 +301,13 @@ struct ContentView: View {
         .padding(12)
         .background(isSelected ? Signalwave.surface : Color.clear)
         .overlay(alignment: .leading) {
-            // A left signal bar marks an armed row.
+            // A left signal bar marks an armed row; tapping it also toggles arm.
             Rectangle()
                 .fill(isSelected ? Signalwave.green : Color.clear)
                 .frame(width: 2)
+                .contentShape(Rectangle())
+                .onTapGesture { model.toggle(unit.id) }
         }
-        .contentShape(Rectangle())
-        .onTapGesture { model.toggle(unit.id) }
     }
 
     private func subtitle(_ unit: DiscoveredAudioUnit) -> String {
@@ -349,4 +390,11 @@ struct ContentView: View {
         if n == 0 { return model.canSend ? "probe & send" : "probe" }
         return model.canSend ? "probe & send \(n)" : "probe \(n)"
     }
+}
+
+/// Identifiable pairing of an inspected plugin id with its stashed dump, used to
+/// drive `.sheet(item:)` (a plain id/String is not `Identifiable`).
+private struct InspectedPlugin: Identifiable {
+    let id: String
+    let dump: ProbeDump
 }

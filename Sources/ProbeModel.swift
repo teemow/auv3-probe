@@ -69,6 +69,10 @@ final class ProbeModel: ObservableObject {
     /// One-line summary of the last completed run (sent/empty/failed tally).
     @Published var runSummary: String?
 
+    /// Drives the inspector overlay: the id of the plugin currently being
+    /// inspected (set by `inspect(_:)`), or nil when the sheet is dismissed.
+    @Published var inspectedID: String?
+
     // Save-to-Files fallback state, driven by `.fileExporter`.
     @Published var isExporting = false
     @Published var exportDocument: ProbeJSONDocument?
@@ -176,6 +180,29 @@ final class ProbeModel: ObservableObject {
 
         await finishRun(results: results, sender: sender)
     }
+
+    /// Probe a single plugin locally and open the inspector — no data is sent.
+    /// Reuses the exact same probe path as `probeAndSendSelected()`, so the
+    /// inspected dump is byte-identical to what a batch send would POST. The
+    /// dump is stashed too, so the per-row Save-to-Files button works right
+    /// after inspecting.
+    func inspect(_ unit: DiscoveredAudioUnit) async {
+        statuses[unit.id] = .probing
+        do {
+            let dump = try await AudioUnitProber.probe(unit)
+            dumps[unit.id] = dump
+            let params = dump.parameters.count
+            statuses[unit.id] = params == 0
+                ? .empty
+                : .probed(params: params, writable: dump.parameters.filter(\.writable).count)
+            inspectedID = unit.id
+        } catch {
+            statuses[unit.id] = .failed(error.localizedDescription)
+        }
+    }
+
+    /// The stashed dump for `id`, if it has been probed.
+    func dump(_ id: String) -> ProbeDump? { dumps[id] }
 
     /// POST the diagnostics report (best-effort) and publish a run summary.
     private func finishRun(results: [ProbeRunResult], sender: ProbeSender?) async {
