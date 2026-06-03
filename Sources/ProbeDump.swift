@@ -17,6 +17,13 @@ struct ProbeComponent: Codable, Equatable {
     var manufacturer: String
     var manufacturerName: String?
     var version: String?
+    /// Human-readable component type (e.g. "Instrument", "Effect"), from
+    /// `AVAudioUnitComponent.typeName`. Optional richer metadata (added 2026-06).
+    var typeName: String?
+    /// Component tags (e.g. "Effects", "Distortion"), from
+    /// `AVAudioUnitComponent.allTagNames` — useful for categorizing a plugin.
+    /// Optional / omitted when empty to match Go omitempty.
+    var tags: [String]?
 }
 
 /// One `AUParameter` as read from `auAudioUnit.parameterTree`.

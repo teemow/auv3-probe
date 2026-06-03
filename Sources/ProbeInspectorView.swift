@@ -16,6 +16,32 @@ struct ProbeInspectorView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var focus: Focus = .all
+
+    /// Optional "isolate" lens set by tapping a chip in the summary: show only one
+    /// parameter group, or only the factory/user preset list. `.all` shows
+    /// everything. Independent of the free-text `query`, which still applies
+    /// within a focused group.
+    enum Focus: Equatable {
+        case all
+        case group(String)
+        case factoryPresets
+        case userPresets
+    }
+
+    private var showsParameters: Bool {
+        switch focus {
+        case .all, .group: return true
+        case .factoryPresets, .userPresets: return false
+        }
+    }
+
+    private var showsPresets: Bool {
+        switch focus {
+        case .all, .factoryPresets, .userPresets: return true
+        case .group: return false
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -30,8 +56,8 @@ struct ProbeInspectorView: View {
                         header
                         summary
                         privacyNote
-                        parameters
-                        presets
+                        if showsParameters { parameters }
+                        if showsPresets { presets }
                         RawJSONSection(dump: dump)
                     }
                     .padding(16)
@@ -41,6 +67,10 @@ struct ProbeInspectorView: View {
         }
         .tint(Signalwave.green)
         .preferredColorScheme(.dark)
+    }
+
+    private func toggleFocus(_ target: Focus) {
+        focus = (focus == target) ? .all : target
     }
 
     // MARK: - Title bar (sheet chrome)
@@ -86,12 +116,7 @@ struct ProbeInspectorView: View {
             }
 
             let c = dump.component
-            Text("\(c.type)/\(c.subtype)/\(c.manufacturer)")
-                .font(Signalwave.mono(.subheadline, weight: .semibold))
-                .foregroundStyle(Signalwave.green)
-                .textSelection(.enabled)
-
-            let extras = [c.manufacturerName, c.version.map { "v\($0)" }]
+            let extras = [c.typeName, c.manufacturerName, c.version.map { "v\($0)" }]
                 .compactMap { $0 }
                 .filter { !$0.isEmpty }
             if !extras.isEmpty {
@@ -99,6 +124,11 @@ struct ProbeInspectorView: View {
                     .font(Signalwave.mono(.caption))
                     .foregroundStyle(Signalwave.dim)
                     .textSelection(.enabled)
+            }
+
+            if let tags = dump.component.tags, !tags.isEmpty {
+                FlowChips(chips: tags)
+                    .padding(.top, 2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -116,43 +146,107 @@ struct ProbeInspectorView: View {
         return VStack(alignment: .leading, spacing: 10) {
             SectionHeader("summary")
 
-            VStack(alignment: .leading, spacing: 6) {
-                summaryRow("parameters", "\(params.count)")
-                summaryRow("writable", "\(writable)")
-                if nonFinite > 0 {
-                    summaryRow("non-finite (sanitized)", "\(nonFinite)", color: Signalwave.amber)
+            // One element: compact wrapped stats on top, then the group + preset
+            // chips. Each chip toggles an isolation lens — the highlighted chip is
+            // the active filter, so no separate banner/"show all" is needed. Tap
+            // again to clear.
+            VStack(alignment: .leading, spacing: 10) {
+                WrapLayout(spacing: 10, lineSpacing: 4) {
+                    statToken("params", "\(params.count)")
+                    statToken("writable", "\(writable)")
+                    if nonFinite > 0 {
+                        statToken("non-finite", "\(nonFinite)", color: Signalwave.amber)
+                    }
+                    if let caps = dump.channelCapabilities, !caps.isEmpty {
+                        statToken("caps", formatChannelCaps(caps))
+                    }
+                    if let latency = dump.latency, latency != 0 {
+                        statToken("latency", "\(formatNumber(latency))s")
+                    }
+                    if let tail = dump.tailTime, tail != 0 {
+                        statToken("tail", "\(formatNumber(tail))s")
+                    }
+                    if let supports = dump.supportsUserPresets {
+                        statToken("user presets", supports ? "yes" : "no")
+                    }
                 }
-                summaryRow("factory presets", "\(factory)")
-                summaryRow("user presets", "\(user)")
-                if let caps = dump.channelCapabilities, !caps.isEmpty {
-                    summaryRow("channel caps", formatChannelCaps(caps))
-                }
-                if let latency = dump.latency, latency != 0 {
-                    summaryRow("latency", "\(formatNumber(latency)) s")
-                }
-                if let tail = dump.tailTime, tail != 0 {
-                    summaryRow("tail time", "\(formatNumber(tail)) s")
-                }
-                if let supports = dump.supportsUserPresets {
-                    summaryRow("supports user presets", supports ? "yes" : "no")
+
+                if hasFilterChips {
+                    WrapLayout(spacing: 6, lineSpacing: 6) {
+                        if groupChips.count > 1 {
+                            ForEach(groupChips, id: \.name) { item in
+                                filterChip("\(item.name) (\(item.count))",
+                                           accent: Signalwave.green,
+                                           isActive: focus == .group(item.name)) {
+                                    toggleFocus(.group(item.name))
+                                }
+                            }
+                        }
+                        if factory > 0 {
+                            filterChip("factory (\(factory))",
+                                       accent: Signalwave.green,
+                                       isActive: focus == .factoryPresets) {
+                                toggleFocus(.factoryPresets)
+                            }
+                        }
+                        if user > 0 {
+                            filterChip("user (\(user))",
+                                       accent: Signalwave.amber,
+                                       isActive: focus == .userPresets) {
+                                toggleFocus(.userPresets)
+                            }
+                        }
+                    }
                 }
             }
             .signalField()
         }
     }
 
-    private func summaryRow(_ key: String, _ value: String, color: Color = Signalwave.fg) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(key)
-                .font(Signalwave.mono(.caption))
+    /// True when there is at least one tappable isolation chip (>1 group, or any
+    /// presets) — i.e. the chip row is worth rendering.
+    private var hasFilterChips: Bool {
+        groupChips.count > 1
+            || dump.factoryPresets?.isEmpty == false
+            || dump.userPresets?.isEmpty == false
+    }
+
+    /// (group name, count) for every group, in first-appearance order. Computed
+    /// once from the full (unfiltered) parameter list.
+    private var groupChips: [(name: String, count: Int)] {
+        grouped(dump.parameters).map { ($0.name, $0.params.count) }
+    }
+
+    /// A compact non-interactive stat (`label value`) for the wrapped stats line.
+    private func statToken(_ label: String, _ value: String, color: Color = Signalwave.fg) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
                 .foregroundStyle(Signalwave.dim)
-            Spacer(minLength: 8)
             Text(value)
-                .font(Signalwave.mono(.caption, weight: .semibold))
                 .foregroundStyle(color)
-                .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
+        .font(Signalwave.mono(.caption2, weight: .semibold))
+    }
+
+    /// A tappable isolation chip; filled in its accent when active.
+    private func filterChip(_ title: String, accent: Color, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(Signalwave.mono(.caption2, weight: .semibold))
+                .foregroundStyle(isActive ? Signalwave.bg : accent)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(isActive ? accent : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .stroke(accent.opacity(0.4), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Privacy note
@@ -170,10 +264,21 @@ struct ProbeInspectorView: View {
 
     // MARK: - Parameters
 
+    private static let ungroupedKey = "ungrouped"
+
+    private func groupKey(_ p: ProbeParam) -> String {
+        (p.group?.isEmpty == false) ? p.group! : Self.ungroupedKey
+    }
+
     private var filteredParameters: [ProbeParam] {
+        var params = dump.parameters
+        // Group focus (set from a summary chip) narrows before the text filter.
+        if case .group(let g) = focus {
+            params = params.filter { groupKey($0) == g }
+        }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return dump.parameters }
-        return dump.parameters.filter { p in
+        guard !q.isEmpty else { return params }
+        return params.filter { p in
             p.displayName.lowercased().contains(q)
                 || p.keyPath.lowercased().contains(q)
                 || p.identifier.lowercased().contains(q)
@@ -187,17 +292,16 @@ struct ProbeInspectorView: View {
     private func grouped(_ params: [ProbeParam]) -> [(name: String, params: [ProbeParam])] {
         var order: [String] = []
         var buckets: [String: [ProbeParam]] = [:]
-        let ungrouped = "ungrouped"
         for p in params {
-            let key = (p.group?.isEmpty == false) ? p.group! : ungrouped
+            let key = groupKey(p)
             if buckets[key] == nil { order.append(key) }
             buckets[key, default: []].append(p)
         }
         // Keep the catch-all bucket last while preserving first-appearance order
         // for real groups (Array.sort is not guaranteed stable, so move by hand).
-        if let idx = order.firstIndex(of: ungrouped), idx != order.count - 1 {
+        if let idx = order.firstIndex(of: Self.ungroupedKey), idx != order.count - 1 {
             order.remove(at: idx)
-            order.append(ungrouped)
+            order.append(Self.ungroupedKey)
         }
         return order.map { ($0, buckets[$0] ?? []) }
     }
@@ -304,13 +408,16 @@ struct ProbeInspectorView: View {
     private var presets: some View {
         let factory = dump.factoryPresets ?? []
         let user = dump.userPresets ?? []
-        if !factory.isEmpty || !user.isEmpty {
+        // Respect a preset focus set from the summary: show only that list.
+        let showFactory = !factory.isEmpty && focus != .userPresets
+        let showUser = !user.isEmpty && focus != .factoryPresets
+        if showFactory || showUser {
             VStack(alignment: .leading, spacing: 10) {
                 SectionHeader("presets")
-                if !factory.isEmpty {
+                if showFactory {
                     presetList("factory", presets: factory, accent: Signalwave.green)
                 }
-                if !user.isEmpty {
+                if showUser {
                     presetList("user · on-device only", presets: user, accent: Signalwave.amber)
                 }
             }
