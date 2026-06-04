@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
+import ProbeKit
 
 // AUMSessionsModel backs the AUM-sessions tab: it uploads .aumproj bytes to the
 // daemon (verbatim), lists the files the daemon can return, writes a downloaded

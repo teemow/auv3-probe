@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import ProbeKit
 
 extension UTType {
     /// AUM full-session project file (`.aumproj`). Declared as an imported type

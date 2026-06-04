@@ -12,34 +12,37 @@ import SwiftUI
 //   the command-line register.
 // - Data (plugin names, FourCC codes, parameter counts) is shown verbatim in
 //   monospace: "no obfuscation, show the raw data".
+//
+// This lives in ProbeKit so both the container app and the AUv3 extensions'
+// SwiftUI views (the AUViewController hosts) share one design language.
 
-enum Signalwave {
+public enum Signalwave {
     /// Primary background — deep charcoal / obsidian.
-    static let bg = Color(hex: 0x121212)
+    public static let bg = Color(hex: 0x121212)
     /// A slightly raised surface for armed/active rows.
-    static let surface = Color(hex: 0x1B1B1B)
+    public static let surface = Color(hex: 0x1B1B1B)
     /// Grid lines / dividers — muted slate.
-    static let grid = Color(hex: 0x2A2A2A)
+    public static let grid = Color(hex: 0x2A2A2A)
     /// Signal accent (primary) — high-visibility cyber green.
-    static let green = Color(hex: 0x00FF66)
+    public static let green = Color(hex: 0x00FF66)
     /// Signal accent (alt) — industrial amber. Reserved for warning/failure
     /// states so the primary green stays the "all clear" signal.
-    static let amber = Color(hex: 0xFF7A00)
+    public static let amber = Color(hex: 0xFF7A00)
     /// Foreground type — near-white on charcoal (avoid mid-grays for fg type).
-    static let fg = Color(white: 0.92)
+    public static let fg = Color(white: 0.92)
     /// Dimmed foreground for secondary/metadata text.
-    static let dim = Color(white: 0.55)
+    public static let dim = Color(white: 0.55)
 
     /// A monospaced font at a given text style, tracking the system's dynamic
     /// type sizing.
-    static func mono(_ style: Font.TextStyle, weight: Font.Weight = .regular) -> Font {
+    public static func mono(_ style: Font.TextStyle, weight: Font.Weight = .regular) -> Font {
         .system(style, design: .monospaced).weight(weight)
     }
 }
 
 extension Color {
     /// Build a color from a 24-bit `0xRRGGBB` literal.
-    init(hex: UInt32) {
+    public init(hex: UInt32) {
         let r = Double((hex >> 16) & 0xFF) / 255
         let g = Double((hex >> 8) & 0xFF) / 255
         let b = Double(hex & 0xFF) / 255
@@ -52,11 +55,16 @@ extension Color {
 /// The signalwave motif: a high-contrast wave intercepted by a solid node (the
 /// "probe" tapping the signal). Drawn as a vector so it scales crisply and stays
 /// monochrome per the design language.
-struct WaveGlyph: View {
-    var color: Color = Signalwave.green
-    var lineWidth: CGFloat = 2
+public struct WaveGlyph: View {
+    public var color: Color = Signalwave.green
+    public var lineWidth: CGFloat = 2
 
-    var body: some View {
+    public init(color: Color = Signalwave.green, lineWidth: CGFloat = 2) {
+        self.color = color
+        self.lineWidth = lineWidth
+    }
+
+    public var body: some View {
         Canvas { ctx, size in
             let midY = size.height / 2
             let amp = size.height * 0.32
@@ -87,10 +95,12 @@ struct WaveGlyph: View {
 
 /// The primary call-to-action: a solid green block with charcoal text — a
 /// screen-printed hardware label, square-ish corners, no gloss.
-struct SignalPrimaryButtonStyle: ButtonStyle {
+public struct SignalPrimaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
 
-    func makeBody(configuration: Configuration) -> some View {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(Signalwave.mono(.headline, weight: .semibold))
             .foregroundStyle(isEnabled ? Signalwave.bg : Signalwave.dim)
@@ -107,13 +117,17 @@ struct SignalPrimaryButtonStyle: ButtonStyle {
 
 /// A secondary, outlined "ghost" button: accent-colored text inside a thin
 /// stroked rectangle. Used for inline actions (test, rescan, all/none, save).
-struct SignalGhostButtonStyle: ButtonStyle {
-    var accent: Color = Signalwave.green
+public struct SignalGhostButtonStyle: ButtonStyle {
+    public var accent: Color = Signalwave.green
     @Environment(\.isEnabled) private var isEnabled
 
-    func makeBody(configuration: Configuration) -> some View {
+    public init(accent: Color = Signalwave.green) {
+        self.accent = accent
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
         let tint = isEnabled ? accent : Signalwave.dim
-        configuration.label
+        return configuration.label
             .font(Signalwave.mono(.subheadline))
             .foregroundStyle(tint)
             .padding(.vertical, 7)
@@ -130,14 +144,14 @@ struct SignalGhostButtonStyle: ButtonStyle {
 }
 
 extension ButtonStyle where Self == SignalGhostButtonStyle {
-    static var signalGhost: SignalGhostButtonStyle { SignalGhostButtonStyle() }
-    static func signalGhost(_ accent: Color) -> SignalGhostButtonStyle {
+    public static var signalGhost: SignalGhostButtonStyle { SignalGhostButtonStyle() }
+    public static func signalGhost(_ accent: Color) -> SignalGhostButtonStyle {
         SignalGhostButtonStyle(accent: accent)
     }
 }
 
 extension ButtonStyle where Self == SignalPrimaryButtonStyle {
-    static var signalPrimary: SignalPrimaryButtonStyle { SignalPrimaryButtonStyle() }
+    public static var signalPrimary: SignalPrimaryButtonStyle { SignalPrimaryButtonStyle() }
 }
 
 // MARK: - Surfaces
@@ -145,7 +159,7 @@ extension ButtonStyle where Self == SignalPrimaryButtonStyle {
 extension View {
     /// A terminal-style input/field surface: charcoal fill, slate hairline
     /// border, hard-ish corners. Replaces system field chrome on the dark field.
-    func signalField() -> some View {
+    public func signalField() -> some View {
         self
             .padding(.vertical, 10)
             .padding(.horizontal, 12)
@@ -161,11 +175,11 @@ extension View {
 }
 
 /// A comment-style section header: `// receiver`, dim slate-green monospace.
-struct SectionHeader: View {
-    let title: String
-    init(_ title: String) { self.title = title }
+public struct SectionHeader: View {
+    public let title: String
+    public init(_ title: String) { self.title = title }
 
-    var body: some View {
+    public var body: some View {
         Text("// \(title)")
             .font(Signalwave.mono(.footnote, weight: .semibold))
             .foregroundStyle(Signalwave.green.opacity(0.8))
@@ -178,11 +192,16 @@ struct SectionHeader: View {
 
 /// A small outlined chip — used for tags, flags, and inline markers across the
 /// inspector views. The accent both tints the text and strokes the border.
-struct SignalChip: View {
-    let text: String
-    var color: Color = Signalwave.green
+public struct SignalChip: View {
+    public let text: String
+    public var color: Color = Signalwave.green
 
-    var body: some View {
+    public init(text: String, color: Color = Signalwave.green) {
+        self.text = text
+        self.color = color
+    }
+
+    public var body: some View {
         Text(text)
             .font(Signalwave.mono(.caption2, weight: .semibold))
             .foregroundStyle(color.opacity(0.9))
@@ -196,11 +215,16 @@ struct SignalChip: View {
 }
 
 /// A wrapping row of `SignalChip`s, backed by the flexible `WrapLayout`.
-struct FlowChips: View {
-    let chips: [String]
-    var color: Color = Signalwave.green
+public struct FlowChips: View {
+    public let chips: [String]
+    public var color: Color = Signalwave.green
 
-    var body: some View {
+    public init(chips: [String], color: Color = Signalwave.green) {
+        self.chips = chips
+        self.color = color
+    }
+
+    public var body: some View {
         WrapLayout(spacing: 6, lineSpacing: 4) {
             ForEach(chips, id: \.self) { chip in
                 SignalChip(text: chip, color: color)
@@ -211,11 +235,16 @@ struct FlowChips: View {
 
 /// Minimal flow layout (iOS 16 `Layout`) that wraps subviews to the available
 /// width. Shared by the chip rows and the inspector summaries.
-struct WrapLayout: Layout {
-    var spacing: CGFloat = 6
-    var lineSpacing: CGFloat = 4
+public struct WrapLayout: Layout {
+    public var spacing: CGFloat = 6
+    public var lineSpacing: CGFloat = 4
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    public init(spacing: CGFloat = 6, lineSpacing: CGFloat = 4) {
+        self.spacing = spacing
+        self.lineSpacing = lineSpacing
+    }
+
+    public func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxWidth = proposal.width ?? .infinity
         var rowWidth: CGFloat = 0
         var rowHeight: CGFloat = 0
@@ -239,7 +268,7 @@ struct WrapLayout: Layout {
         return CGSize(width: min(totalWidth, maxWidth), height: totalHeight)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    public func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let maxWidth = bounds.width
         var x = bounds.minX
         var y = bounds.minY

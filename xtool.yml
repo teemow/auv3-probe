@@ -1,5 +1,9 @@
 version: 1
 bundleID: com.teemow.auv3probe
+# The container app is the AUv3ProbeApp library product (the @main app). The two
+# AUv3 app extensions are packed into PlugIns/<name>.appex (added below once their
+# sources land).
+product: AUv3ProbeApp
 # A dedicated plist for xtool: the canonical Resources/Info.plist uses XcodeGen
 # $(...) build-setting substitutions that xtool does not resolve.
 infoPath: xtool-Info.plist
@@ -9,3 +13,16 @@ entitlementsPath: Resources/AUv3Probe.entitlements
 # xtool can't read Assets.xcassets, so point it straight at the 1024x1024 PNG in
 # the asset catalog (no copy needed).
 iconPath: Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+# The two AUv3 app extensions. xtool packs each SwiftPM library product into
+# PlugIns/<name>.appex with its NSExtension/AudioComponents Info.plist. Each
+# carries the app bundle id as a prefix (Apple requires appex ids to nest under
+# the host app id). See docs/auv3-extension.md.
+extensions:
+  - product: ProbeMidiBrain
+    bundleID: com.teemow.auv3probe.MidiBrain
+    infoPath: Extensions/ProbeMidiBrain-Info.plist
+    entitlementsPath: Resources/AUv3Probe.entitlements
+  - product: ProbeAudioTap
+    bundleID: com.teemow.auv3probe.AudioTap
+    infoPath: Extensions/ProbeAudioTap-Info.plist
+    entitlementsPath: Resources/AUv3Probe.entitlements

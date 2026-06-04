@@ -1,4 +1,5 @@
 import SwiftUI
+import ProbeKit
 
 // AUMSessionInspectorView renders a parsed AUM project (AUMSessionMap) in the
 // signalwave design language (see docs/signalwave.md). It mirrors

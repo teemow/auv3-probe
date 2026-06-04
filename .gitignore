@@ -19,5 +19,9 @@ Package.resolved
 # xtool (Linux build/sign/install) output — see docs/building-on-linux.md
 xtool/
 
+# XcodeGen-generated extension Info.plists (see project.yml `info:` blocks); the
+# canonical NSExtension content lives in project.yml + Extensions/*-Info.plist.
+Generated/
+
 # macOS
 .DS_Store

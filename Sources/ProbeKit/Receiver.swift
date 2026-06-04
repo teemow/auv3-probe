@@ -10,33 +10,36 @@ import SwiftUI
 // The host is a local LAN address typed by the user and persisted to
 // UserDefaults so it survives launches. It is never committed to git (public
 // repo rule); persisting it on-device is fine.
+//
+// Lives in ProbeKit so the ProbeAudioTap extension can reuse the same
+// host-parsing / DaemonClient factory for its stream target.
 
 @MainActor
-final class Receiver: ObservableObject {
+public final class Receiver: ObservableObject {
     private static let hostKey = "receiverHost"
 
-    @Published var host: String {
+    @Published public var host: String {
         didSet { UserDefaults.standard.set(host, forKey: Self.hostKey) }
     }
 
-    @Published var connectionOK = false
-    @Published var connectionMessage: String?
-    @Published var isTesting = false
+    @Published public var connectionOK = false
+    @Published public var connectionMessage: String?
+    @Published public var isTesting = false
 
-    init() {
+    public init() {
         host = UserDefaults.standard.string(forKey: Self.hostKey) ?? ""
     }
 
     /// True when a non-empty host has been entered.
-    var isConfigured: Bool {
+    public var isConfigured: Bool {
         !host.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// A client for the current host, or nil when the host is empty/unparseable.
-    var client: DaemonClient? { DaemonClient(host: host) }
+    public var client: DaemonClient? { DaemonClient(host: host) }
 
     /// Test connectivity via `GET /healthz`, publishing the outcome.
-    func testConnection() async {
+    public func testConnection() async {
         guard let client = client else {
             connectionOK = false
             connectionMessage = "Enter a host (e.g. host:7800)"

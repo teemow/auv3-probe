@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>ProbeMidiBrain</string>
+    <key>CFBundleName</key>
+    <string>ProbeMidiBrain</string>
+    <!-- An AUv3 audio unit with a UI is a classic NSExtension (com.apple.AudioUnit-UI),
+         not an ExtensionKit extension. The principal class is the AUViewController
+         that also conforms to AUAudioUnitFactory; @objc(...) in the Swift source
+         pins these bare class names so they resolve under SwiftPM module mangling. -->
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.AudioUnit-UI</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>ProbeMidiBrainViewController</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>AudioComponents</key>
+            <array>
+                <dict>
+                    <key>name</key>
+                    <string>Tmow: ProbeMidiBrain</string>
+                    <key>description</key>
+                    <string>Song-aware scene driver (MIDI processor)</string>
+                    <key>factoryFunction</key>
+                    <string>ProbeMidiBrainViewController</string>
+                    <key>manufacturer</key>
+                    <string>Tmow</string>
+                    <key>type</key>
+                    <string>aumi</string>
+                    <key>subtype</key>
+                    <string>pbMi</string>
+                    <key>version</key>
+                    <integer>1</integer>
+                    <key>sandboxSafe</key>
+                    <true/>
+                    <key>tags</key>
+                    <array>
+                        <string>MIDI</string>
+                    </array>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+</dict>
+</plist>
