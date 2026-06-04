@@ -149,36 +149,47 @@ decodes the NSKeyedArchiver binary plist itself (`Sources/BinaryPlist.swift` +
 the parsed structure — version, tempo, channels, plugin nodes (with their AUv3
 component identity) and assigned MIDI mappings.
 
-List and inspect your sessions:
+There are two ways to get a session into the inspector — they differ only in
+whether the app *remembers* where to look:
 
-- **Linked folder**: tap **link aum folder** once and pick AUM's own folder (e.g.
-  *On My iPad/AUM*). The app stores a **security-scoped bookmark** and lists every
-  `.aumproj` / `.aum_midimap` in it. Tap any row to parse it locally and open the
-  inspector.
-- **Open file**: tap **open file** to pick any session/mapping and inspect it,
-  without linking a folder.
+- **link aum folder** — a *persistent* link. Tap it once and pick AUM's own
+  folder (e.g. *On My iPad/AUM*). The app stores a **security-scoped bookmark**
+  and from then on lists **every** `.aumproj` / `.aum_midimap` in that folder, so
+  you can inspect any of them with one tap (and, with a host, upload them). This
+  is also what enables dialog-free **write-back** into AUM.
+- **open file** — a *one-off*. Pick a single session/mapping to inspect right
+  now; nothing is remembered and no folder is linked.
+
+Either way the file is parsed locally and rendered: version, tempo, channels,
+plugin nodes (with their AUv3 component identity) and assigned MIDI mappings.
 
 iOS has no entitlement that grants blanket access to another app's documents, so
 the user-driven picker or the one-time folder bookmark is the only sanctioned
 path. The bookmark is stored on-device only.
 
-### Optional: the daemon ferry
+### Optional: the mcp-midi-controller ferry
 
-When a daemon `host:port` is configured in the top bar (and **Test connection**
-passes), an optional ferry appears:
+When an `mcp-midi-controller host:port` is set in the top bar (and **Test
+connection** passes), an optional ferry appears:
 
-- **Upload** device sessions to the daemon (`POST /aum-session`, verbatim bytes)
-  — per file or **upload all** from the linked folder.
-- **Daemon files**: pull daemon-generated files back into AUM. With a folder
-  linked they are written **straight into it**; otherwise the **share sheet**
-  opens ("Open in AUM" / "Save to Files…").
+- **Upload** device sessions to mcp-midi-controller (`POST /aum-session`, verbatim
+  bytes) — per file or **upload all** from the linked folder.
+- **mcp-midi-controller files**: list and pull files it holds (`GET /aum-session`)
+  back into AUM. With a folder linked they are written **straight into it**;
+  otherwise the **share sheet** opens ("Open in AUM" / "Save to Files…"). Rows
+  can also be inspected — the app downloads the bytes and parses them on-device.
+
+Run the receiver from the mcp-midi-controller repo with
+`go run ./cmd/auv3-probe` (or the full daemon, `cmd/mcp-midi-controller`). The
+standalone command seeds a synthetic `template.aumproj` into its staging dir on
+first run, so the list has something to test with before you upload anything.
 
 The ferry is purely additive — listing and inspecting always work offline.
 
 > **Privacy.** Session files carry installation-specific data (song/channel
 > names). They are parsed and shown on-device; when the ferry is used they travel
-> only between the device and your own LAN daemon. The app never logs or commits
-> filenames, paths, or hostnames.
+> only between the device and your own mcp-midi-controller on the LAN. The app
+> never logs or commits filenames, paths, or hostnames.
 
 ## CI
 

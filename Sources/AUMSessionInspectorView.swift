@@ -36,8 +36,8 @@ struct AUMSessionInspectorView: View {
                     LazyVStack(alignment: .leading, spacing: 24, pinnedViews: [.sectionHeaders]) {
                         header
                         summary
-                        privacyNote
                         channelsSection
+                        routesSection
                         mappingsSection
                         RawAUMSessionJSONSection(map: map)
                     }
@@ -60,7 +60,7 @@ struct AUMSessionInspectorView: View {
                 Text("inspect")
                     .font(Signalwave.mono(.subheadline, weight: .bold))
                     .foregroundStyle(Signalwave.fg)
-                Text("aum project · parsed on-device")
+                Text(entry.isMidiMap ? "aum midi map" : "aum session")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
             }
@@ -111,6 +111,9 @@ struct AUMSessionInspectorView: View {
                 if map.mappings.count != enabledMappings {
                     statToken("enabled", "\(enabledMappings)")
                 }
+                if !map.routes.isEmpty {
+                    statToken("routes", "\(map.routes.count)")
+                }
                 if let tempo = map.tempo, tempo > 0 {
                     statToken("tempo", "\(formatNumber(tempo))")
                 }
@@ -125,19 +128,6 @@ struct AUMSessionInspectorView: View {
             Text(value).foregroundStyle(color).textSelection(.enabled)
         }
         .font(Signalwave.mono(.caption2, weight: .semibold))
-    }
-
-    // MARK: - Privacy note
-
-    private var privacyNote: some View {
-        Label {
-            Text("channel/song names are installation-specific. parsed on-device and shown here only — never logged or committed to git.")
-        } icon: {
-            Image(systemName: "lock.shield")
-        }
-        .font(Signalwave.mono(.caption2))
-        .foregroundStyle(Signalwave.dim)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Channels
@@ -234,11 +224,17 @@ struct AUMSessionInspectorView: View {
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
                     .frame(minWidth: 20, alignment: .leading)
-                Text(node.label)
+                Text(nodeTitle(node))
                     .font(Signalwave.mono(.caption))
-                    .foregroundStyle(Signalwave.fg)
+                    .foregroundStyle(node.isPlugin ? Signalwave.fg : Signalwave.dim)
                     .textSelection(.enabled)
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                if let routing = nodeRouting(node) {
+                    Text(routing)
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.green.opacity(0.9))
+                        .textSelection(.enabled)
+                }
             }
 
             if let component = node.component {
@@ -264,6 +260,135 @@ struct AUMSessionInspectorView: View {
                     .foregroundStyle(Signalwave.dim.opacity(0.8))
                     .textSelection(.enabled)
                     .padding(.leading, 28)
+            }
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A human node title: the plugin name for AUv3 nodes, else a friendly name
+    /// for the AUM built-in (HW I/O, bus routing, gain, pan, …).
+    private func nodeTitle(_ node: NodeInfo) -> String {
+        if let name = node.componentName, !name.isEmpty { return name }
+        if let cls = node.archiveDescClass, !cls.isEmpty { return Self.builtInName(cls) }
+        return "node \(node.slot)"
+    }
+
+    /// The bus / hardware target a built-in routing node points at, e.g.
+    /// "→ bus 13" or "hw out 1 · L".
+    private func nodeRouting(_ node: NodeInfo) -> String? {
+        guard let cls = node.archiveDescClass else { return nil }
+        switch cls {
+        case "BusSourceDescription":
+            return node.busIndex.map { "from bus \($0)" }
+        case "BusDestDescription", "BusSendDescription":
+            return node.busIndex.map { "to bus \($0)" }
+        case "HWInputDescription", "HWOutputDescription", "HWSendDescription":
+            var parts: [String] = []
+            if let hw = node.hwBusIndex { parts.append("bus \(hw)") }
+            if let m = node.monoSelect, let label = Self.monoLabel(m) { parts.append(label) }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        default:
+            return nil
+        }
+    }
+
+    /// Friendly name for an AUM built-in node's `archiveDescClass`.
+    private static func builtInName(_ cls: String) -> String {
+        switch cls {
+        case "HWInputDescription": return "Hardware input"
+        case "HWOutputDescription": return "Hardware output"
+        case "HWSendDescription": return "Hardware send"
+        case "BusSourceDescription": return "Bus input"
+        case "BusDestDescription": return "Bus output"
+        case "BusSendDescription": return "Bus send"
+        case "GainNodeDescription": return "Gain"
+        case "PanDescription": return "Pan"
+        case "BalDescription": return "Balance"
+        case "MonoDescription": return "Mono"
+        case "MidSideConvertDescription": return "Mid/side convert"
+        case "MidSideBalDescription": return "Mid/side balance"
+        case "SatNodeDescription": return "Saturation"
+        case "EQHiPassDescription": return "High-pass filter"
+        case "EQLowPassDescription": return "Low-pass filter"
+        case "FilePlayerNodeDescription": return "File player"
+        case "IAANodeDescription": return "Inter-app audio"
+        case "AUXIONodeDescription": return "I/O node"
+        case "AUXNodeDescription": return "Audio unit"
+        default:
+            // Strip the "Description" suffix as a sensible fallback.
+            if cls.hasSuffix("Description") {
+                return String(cls.dropLast("Description".count))
+            }
+            return cls
+        }
+    }
+
+    /// AUM's `monoSelect` for hardware I/O: 0 = stereo, 1 = left, 2 = right.
+    private static func monoLabel(_ v: Int) -> String? {
+        switch v {
+        case 0: return "stereo"
+        case 1: return "L"
+        case 2: return "R"
+        default: return "mono \(v)"
+        }
+    }
+
+    // MARK: - MIDI routing
+
+    @ViewBuilder
+    private var routesSection: some View {
+        if !map.routes.isEmpty {
+            Section {
+                VStack(spacing: 0) {
+                    ForEach(Array(map.routes.enumerated()), id: \.offset) { idx, route in
+                        if idx > 0 {
+                            Rectangle().fill(Signalwave.grid).frame(height: 1)
+                        }
+                        routeRow(route)
+                    }
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(Signalwave.grid, lineWidth: 1)
+                )
+            } header: {
+                HStack(spacing: 8) {
+                    SectionHeader("midi routing")
+                    Spacer()
+                    Text("\(map.routes.count)")
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                }
+                .padding(.vertical, 6)
+                .background(Signalwave.bg)
+            }
+        }
+    }
+
+    private func routeRow(_ route: MidiRoute) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(route.source.isEmpty ? "(source)" : route.source)
+                    .font(Signalwave.mono(.caption))
+                    .foregroundStyle(Signalwave.fg)
+                    .textSelection(.enabled)
+                Image(systemName: "arrow.right")
+                    .font(.caption2)
+                    .foregroundStyle(Signalwave.green)
+                Text(route.destination.isEmpty ? "(destination)" : route.destination)
+                    .font(Signalwave.mono(.caption))
+                    .foregroundStyle(Signalwave.fg)
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+            }
+            let cats = [route.sourceCategory, route.destinationCategory]
+                .filter { !$0.isEmpty }
+            if !cats.isEmpty {
+                Text(cats.joined(separator: " → "))
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
             }
         }
         .padding(.vertical, 7)

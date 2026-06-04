@@ -1,28 +1,27 @@
 import Foundation
 
-// DaemonClient is the app's single HTTP client to the companion daemon's LAN
-// receiver (the mcp-midi-controller repo, internal/auv3receiver). Both halves of
-// the app talk to the same daemon, so they share one client and one host-parsing
-// path rather than duplicating it:
+// DaemonClient is the app's single HTTP client to mcp-midi-controller's LAN
+// receiver (mcp-midi-controller repo, internal/auv3receiver + internal/aumreceiver).
+// Both halves of the app talk to the same host, so they share one client and one
+// host-parsing path rather than duplicating it:
 //
-//   Audio units (AUv3):
+//   Audio units (AUv3, internal/auv3receiver):
 //     POST /auv3-probe              — one audio unit's AudioUnitDetails
 //     POST /auv3-probe/diagnostics  — the full scan report (incl. failures)
-//   AUM sessions (.aumproj):
-//     POST /aum-session             — upload one .aumproj's raw bytes
-//     GET  /aum-sessions            — manifest of files the daemon can return
-//     GET  /aum-session/{id}        — one file's raw bytes (to write into AUM)
-//     GET  /aum-session/{id}/map    — the parsed AUMSessionMap (for inspection)
+//   AUM sessions (.aumproj, internal/aumreceiver):
+//     POST   /aum-session?name=<file> — upload one .aumproj's raw bytes
+//     GET    /aum-session             — manifest of files the receiver can return
+//     GET    /aum-session/{file}      — one file's raw bytes (to write into AUM)
+//     DELETE /aum-session/{file}      — remove one staged file (controller-side)
+//     DELETE /aum-session             — clear all staged files (controller-side)
 //   Shared:
 //     GET  /healthz                 — connectivity test, run first
 //
-// (The audio-unit endpoint paths still say "auv3-probe" — that is the daemon's
-// wire contract, unchanged. The Swift side names the concept directly.)
-//
-// Session uploads/downloads move the exact .aumproj bytes (no JSON re-encoding):
-// the app has no project parser, so re-serializing would corrupt a format it does
-// not model. All structured understanding of a project comes from the daemon's
-// /map endpoint, which the Go internal/aum library produces.
+// These paths/JSON shapes mirror the Go receivers' wire contract exactly (see
+// internal/aumreceiver/receiver.go). The session ferry is optional: the app
+// reads and inspects .aumproj/.aum_midimap on-device (AUMSessionParser), and only
+// uses these endpoints to hand files to / pull files from mcp-midi-controller.
+// Uploads/downloads move the exact bytes (no JSON re-encoding).
 
 enum DaemonError: LocalizedError {
     case badHost(String)
@@ -35,7 +34,7 @@ enum DaemonError: LocalizedError {
             return "could not parse host \"\(h)\" (try host:7800)"
         case .notOK(let code, let body):
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-            return "daemon returned HTTP \(code)\(trimmed.isEmpty ? "" : ": \(trimmed)")"
+            return "mcp-midi-controller returned HTTP \(code)\(trimmed.isEmpty ? "" : ": \(trimmed)")"
         case .healthzFailed(let code):
             return "healthz returned HTTP \(code)"
         }
@@ -51,6 +50,14 @@ struct DaemonClient {
     /// Sessions can be multiple MB, so file transfers get a generous timeout;
     /// the small JSON calls (audio-unit POST, manifest, healthz) stay snappy.
     static let transferTimeout: TimeInterval = 120
+
+    /// RFC3339 formatter used to ship a file's original modified time on upload,
+    /// matching `time.RFC3339` on the receiver.
+    static let rfc3339: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     /// Build a client from a user-entered `host`, `host:port`, or full URL.
     /// Defaults to the `http` scheme and port 7800 when omitted. No endpoint is
@@ -101,34 +108,47 @@ struct DaemonClient {
 
     // MARK: - AUM sessions (.aumproj)
 
-    /// `POST /aum-session` with the verbatim `.aumproj` bytes. The filename rides
-    /// in `X-AUM-Filename` and the body is `application/octet-stream` — no JSON
-    /// re-encoding of the project. Returns the daemon's decoded summary.
-    func uploadAUMSession(data: Data, filename: String) async throws -> AUMSessionSummary {
-        var request = URLRequest(url: baseURL.appendingPathComponent("aum-session"))
+    /// `POST /aum-session?name=<filename>` with the verbatim `.aumproj` bytes
+    /// (`application/octet-stream`, no JSON re-encoding). The receiver derives a
+    /// staging id from the `name` query. The optional `modified` date is sent so
+    /// the receiver can preserve the file's original timestamp (keeping device and
+    /// controller rows showing the same date). Returns the decoded summary.
+    func uploadAUMSession(data: Data, filename: String, modified: Date? = nil) async throws -> AUMSessionSummary {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("aum-session"),
+            resolvingAgainstBaseURL: false
+        )
+        var items = [URLQueryItem(name: "name", value: filename)]
+        if let modified = modified {
+            items.append(URLQueryItem(name: "modified", value: Self.rfc3339.string(from: modified)))
+        }
+        components?.queryItems = items
+        guard let url = components?.url else { throw DaemonError.badHost(baseURL.absoluteString) }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        request.setValue(filename, forHTTPHeaderField: "X-AUM-Filename")
         request.timeoutInterval = DaemonClient.transferTimeout
         request.httpBody = data
         let body = try await perform(request)
         return try JSONDecoder().decode(AUMSessionSummary.self, from: body)
     }
 
-    /// `GET /aum-sessions` — the manifest of files the daemon can return.
+    /// `GET /aum-session` — the manifest of files mcp-midi-controller can return,
+    /// mapped to the app's UI entries.
     func listAUMSessions() async throws -> [AUMSessionEntry] {
-        var request = URLRequest(url: baseURL.appendingPathComponent("aum-sessions"))
+        var request = URLRequest(url: baseURL.appendingPathComponent("aum-session"))
         request.httpMethod = "GET"
         request.timeoutInterval = 30
         let body = try await perform(request)
-        return try JSONDecoder().decode([AUMSessionEntry].self, from: body)
+        let manifest = try JSONDecoder().decode(AUMSessionManifest.self, from: body)
+        return manifest.sessions.map(\.asEntry)
     }
 
-    /// `GET /aum-session/{id}` — the verbatim file bytes plus the filename the
-    /// daemon advertises via `Content-Disposition` (falling back to `<id>`). The
-    /// returned bytes are written into AUM unchanged.
-    func downloadAUMSession(id: String) async throws -> (Data, String) {
-        let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(id)
+    /// `GET /aum-session/{file}` — the verbatim file bytes plus the filename the
+    /// receiver advertises via `Content-Disposition` (falling back to `file`).
+    /// The returned bytes are written into AUM unchanged.
+    func downloadAUMSession(filename: String) async throws -> (data: Data, filename: String) {
+        let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(filename)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = DaemonClient.transferTimeout
@@ -138,22 +158,26 @@ struct DaemonClient {
         guard (200..<300).contains(code) else {
             throw DaemonError.notOK(code, String(data: data, encoding: .utf8) ?? "")
         }
-        let filename = Self.filename(from: http) ?? id
-        return (data, filename)
+        let resolved = Self.filename(from: http) ?? filename
+        return (data, resolved)
     }
 
-    /// `GET /aum-session/{id}/map` — the parsed, JSON AUMSessionMap the daemon's
-    /// internal/aum library produces from the stored project. This is what the
-    /// in-app inspector renders; the app itself never parses the plist.
-    func fetchAUMSessionMap(id: String) async throws -> AUMSessionMap {
-        let url = baseURL.appendingPathComponent("aum-session")
-            .appendingPathComponent(id)
-            .appendingPathComponent("map")
+    /// `DELETE /aum-session/{file}` — remove one staged file from
+    /// mcp-midi-controller (controller-side only; never touches the iPad).
+    func deleteAUMSession(filename: String) async throws {
+        let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(filename)
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = DaemonClient.transferTimeout
-        let body = try await perform(request)
-        return try JSONDecoder().decode(AUMSessionMap.self, from: body)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 30
+        _ = try await perform(request)
+    }
+
+    /// `DELETE /aum-session` — clear every staged file from mcp-midi-controller.
+    func deleteAllAUMSessions() async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent("aum-session"))
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 30
+        _ = try await perform(request)
     }
 
     // MARK: - Plumbing

@@ -45,6 +45,10 @@ struct RootView: View {
                 }
             }
 
+            Text("// mcp-midi-controller host on your lan (optional)")
+                .font(Signalwave.mono(.caption2))
+                .foregroundStyle(Signalwave.dim)
+
             HStack(spacing: 8) {
                 Text(">")
                     .font(Signalwave.mono(.body, weight: .bold))

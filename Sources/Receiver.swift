@@ -47,7 +47,7 @@ final class Receiver: ObservableObject {
         do {
             try await client.healthz()
             connectionOK = true
-            connectionMessage = "Connected to \(client.baseURL.host ?? "daemon")"
+            connectionMessage = "Connected to \(client.baseURL.host ?? "mcp-midi-controller")"
         } catch {
             connectionOK = false
             connectionMessage = error.localizedDescription

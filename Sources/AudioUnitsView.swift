@@ -295,7 +295,7 @@ struct AudioUnitsView: View {
             .disabled(model.isBusy || model.selected.isEmpty)
 
             if !receiver.isConfigured {
-                Text("// no daemon host — units are read and can be exported via the save button.")
+                Text("// no mcp-midi-controller host — units are read and can be exported via the save button.")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
                     .multilineTextAlignment(.leading)

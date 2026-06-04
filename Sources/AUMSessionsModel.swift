@@ -21,7 +21,10 @@ import UniformTypeIdentifiers
 /// Per-row progress for a downloadable session/mapping entry.
 enum AUMSessionRowStatus: Equatable {
     case idle
+    case uploading      // POSTing this file to mcp-midi-controller
+    case uploaded       // staged on mcp-midi-controller
     case downloading
+    case deleting       // removing this file from mcp-midi-controller
     case sharing        // share sheet presented for write-back
     case saved          // written into the AUM folder, or shared/saved out
     case failed(String)
@@ -29,7 +32,10 @@ enum AUMSessionRowStatus: Equatable {
     var text: String {
         switch self {
         case .idle: return ""
+        case .uploading: return "Uploading…"
+        case .uploaded: return "Uploaded to mcp-midi-controller"
         case .downloading: return "Downloading…"
+        case .deleting: return "Deleting…"
         case .sharing: return "Choose where to save…"
         case .saved: return "Saved"
         case .failed(let why): return "Failed · \(why)"
@@ -37,8 +43,8 @@ enum AUMSessionRowStatus: Equatable {
     }
 
     var isError: Bool { if case .failed = self { return true }; return false }
-    var isDone: Bool { self == .saved }
-    var isWorking: Bool { self == .downloading }
+    var isDone: Bool { self == .saved || self == .uploaded }
+    var isWorking: Bool { self == .downloading || self == .uploading || self == .deleting }
 }
 
 /// An inspected AUM session: its manifest entry paired with the parsed map.
@@ -58,8 +64,10 @@ struct AUMShareItem: Identifiable {
 
 @MainActor
 final class AUMSessionsModel: ObservableObject {
-    // Picker state (one-off file pick).
-    @Published var isImporting = false
+    // Shared "no controller host configured" copy: `noHostRow` lands on a file's
+    // own row status; `noHostMessage` is the section-level prompt.
+    static let noHostRow = "no host — set one in the top bar"
+    static let noHostMessage = "enter a host (e.g. host:7800)"
 
     // Upload state.
     @Published var isUploading = false
@@ -124,29 +132,39 @@ final class AUMSessionsModel: ObservableObject {
 
     // MARK: - Upload (linked folder)
 
-    /// Upload one file enumerated from the linked AUM folder.
+    /// Upload one file enumerated from the linked AUM folder. Progress and the
+    /// outcome live on the file's own row (statuses[file.id]) so other rows stay
+    /// interactive — the file itself remains on device and tappable to inspect.
     func uploadFromFolder(_ file: AUMFolderFile, client: DaemonClient?, folder: AUMFolderBookmark) async {
         guard let client = client else {
-            uploadMessage = "enter a host (e.g. host:7800)"
+            statuses[file.id] = .failed(Self.noHostRow)
             return
         }
         let data: Data
         do {
             data = try folder.read(file)
         } catch {
-            uploadMessage = friendly(error)
+            statuses[file.id] = .failed(friendly(error))
             return
         }
-        await send(data: data, filename: file.name, client: client)
+        statuses[file.id] = .uploading
+        uploadMessage = nil
+        do {
+            uploadSummary = try await client.uploadAUMSession(data: data, filename: file.name, modified: file.modified)
+            statuses[file.id] = .uploaded
+            await refreshSessions(client: client)
+        } catch {
+            statuses[file.id] = .failed(friendly(error))
+        }
     }
 
-    /// Upload every file currently listed from the linked AUM folder.
-    func uploadAllFromFolder(client: DaemonClient?, folder: AUMFolderBookmark) async {
+    /// Upload `files` enumerated from the linked AUM folder (the caller passes
+    /// the currently visible/filtered set).
+    func uploadAllFromFolder(_ files: [AUMFolderFile], client: DaemonClient?, folder: AUMFolderBookmark) async {
         guard let client = client else {
-            uploadMessage = "enter a host (e.g. host:7800)"
+            uploadMessage = Self.noHostMessage
             return
         }
-        let files = folderFiles
         guard !files.isEmpty else { return }
 
         isUploading = true
@@ -159,11 +177,14 @@ final class AUMSessionsModel: ObservableObject {
         var failed = 0
         var last: AUMSessionSummary?
         for file in files {
+            statuses[file.id] = .uploading
             do {
                 let data = try folder.read(file)
-                last = try await client.uploadAUMSession(data: data, filename: file.name)
+                last = try await client.uploadAUMSession(data: data, filename: file.name, modified: file.modified)
+                statuses[file.id] = .uploaded
                 ok += 1
             } catch {
+                statuses[file.id] = .failed(friendly(error))
                 failed += 1
             }
         }
@@ -176,29 +197,12 @@ final class AUMSessionsModel: ObservableObject {
         await refreshSessions(client: client)
     }
 
-    /// Shared upload tail: POST `data` and refresh the manifest.
-    private func send(data: Data, filename: String, client: DaemonClient) async {
-        isUploading = true
-        uploadMessage = nil
-        uploadInfo = nil
-        uploadSummary = nil
-        defer { isUploading = false }
-
-        do {
-            let summary = try await client.uploadAUMSession(data: data, filename: filename)
-            uploadSummary = summary
-            await refreshSessions(client: client)
-        } catch {
-            uploadMessage = friendly(error)
-        }
-    }
-
     // MARK: - Manifest
 
-    /// Fetch the daemon's `GET /aum-sessions` manifest.
+    /// Fetch mcp-midi-controller's `GET /aum-session` manifest.
     func refreshSessions(client: DaemonClient?) async {
         guard let client = client else {
-            listMessage = "enter a host (e.g. host:7800)"
+            listMessage = Self.noHostMessage
             return
         }
         isListing = true
@@ -232,7 +236,7 @@ final class AUMSessionsModel: ObservableObject {
         do {
             folderFiles = try folder.listFiles()
             if folderFiles.isEmpty {
-                folderMessage = "no .aumproj files in this folder."
+                folderMessage = "no .aumproj / .aum_midimap files here or in any subfolder."
             }
         } catch {
             folderFiles = []
@@ -264,47 +268,125 @@ final class AUMSessionsModel: ObservableObject {
         }
     }
 
-    /// Fetch the parsed AUMSessionMap for a daemon `entry` and open the
-    /// inspector (the daemon ferry path).
+    /// Inspect a file mcp-midi-controller holds: download its verbatim bytes and
+    /// parse them on-device (same parser as local files — no `/map` endpoint).
     func inspect(_ entry: AUMSessionEntry, client: DaemonClient?) async {
         guard let client = client else {
-            statuses[entry.id] = .failed("no host")
+            statuses[entry.id] = .failed(Self.noHostRow)
             return
         }
         inspectingID = entry.id
         defer { inspectingID = nil }
         do {
-            let map = try await client.fetchAUMSessionMap(id: entry.id)
+            let (data, _) = try await client.downloadAUMSession(filename: entry.filename)
+            let map = try AUMSessionParser.parse(data: data, isMidiMap: entry.isMidiMap)
             inspected = InspectedAUMSession(entry: entry, map: map)
         } catch {
             statuses[entry.id] = .failed(friendly(error))
         }
     }
 
+    // MARK: - Delete (mcp-midi-controller only)
+
+    /// Delete one staged file from mcp-midi-controller. This only removes the
+    /// copy on the controller — never a file in the linked AUM folder / on the
+    /// iPad (deleting AUM sessions on-device is intentionally not offered).
+    func deleteEntry(_ entry: AUMSessionEntry, client: DaemonClient?) async {
+        guard let client = client else {
+            statuses[entry.id] = .failed(Self.noHostRow)
+            return
+        }
+        statuses[entry.id] = .deleting
+        do {
+            try await client.deleteAUMSession(filename: entry.filename)
+            entries.removeAll { $0.id == entry.id }
+            statuses[entry.id] = nil
+        } catch {
+            statuses[entry.id] = .failed(friendly(error))
+        }
+    }
+
+    /// Clear every staged file from mcp-midi-controller (controller-side only).
+    func clearSessions(client: DaemonClient?) async {
+        guard let client = client else {
+            listMessage = Self.noHostMessage
+            return
+        }
+        isListing = true
+        listMessage = nil
+        defer { isListing = false }
+        do {
+            try await client.deleteAllAUMSessions()
+            entries = []
+            listMessage = "cleared mcp-midi-controller."
+        } catch {
+            listMessage = friendly(error)
+        }
+    }
+
     // MARK: - Download / write-back
+
+    /// Distinct subfolders (relative paths) that already exist in the linked AUM
+    /// tree, sorted for display. Used to let the user choose where a downloaded
+    /// session lands instead of always dropping it in the root.
+    var folderSubfolders: [String] {
+        let subs = Set(folderFiles.map(\.subfolder).filter { !$0.isEmpty })
+        return subs.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Download `entry`'s bytes and write them into a chosen `subfolder` of the
+    /// linked AUM folder ("" = root). Used by the destination picker so the user
+    /// controls where the session goes.
+    func saveToFolder(_ entry: AUMSessionEntry, into subfolder: String, client: DaemonClient?, folder: AUMFolderBookmark) async {
+        guard let client = client else {
+            statuses[entry.id] = .failed(Self.noHostRow)
+            return
+        }
+        statuses[entry.id] = .downloading
+        guard let (data, filename) = await fetchBytes(entry, client: client) else { return }
+        do {
+            try folder.write(data: data, filename: filename, subfolder: subfolder)
+            statuses[entry.id] = .saved
+            refreshFolder(folder)
+        } catch {
+            statuses[entry.id] = .failed(friendly(error))
+        }
+    }
+
+    /// Download `entry`'s verbatim bytes, resolving the filename the controller
+    /// advertises (falling back to the entry's). On failure it sets the row's
+    /// `.failed` status and returns nil, so callers can `guard let`.
+    private func fetchBytes(_ entry: AUMSessionEntry, client: DaemonClient) async -> (data: Data, filename: String)? {
+        do {
+            let (data, resolved) = try await client.downloadAUMSession(filename: entry.filename)
+            return (data, resolved.isEmpty ? entry.filename : resolved)
+        } catch {
+            statuses[entry.id] = .failed(friendly(error))
+            return nil
+        }
+    }
 
     /// Download `entry`'s verbatim bytes and write them back toward AUM: straight
     /// into the linked folder when one is bound, otherwise via the share sheet.
     func download(_ entry: AUMSessionEntry, client: DaemonClient?, folder: AUMFolderBookmark) async {
         guard let client = client else {
-            statuses[entry.id] = .failed("no host")
+            statuses[entry.id] = .failed(Self.noHostRow)
             return
         }
         statuses[entry.id] = .downloading
-        let data: Data
-        let filename: String
-        do {
-            let result = try await client.downloadAUMSession(id: entry.id)
-            data = result.0
-            filename = result.1.isEmpty ? entry.filename : result.1
-        } catch {
-            statuses[entry.id] = .failed(friendly(error))
-            return
-        }
+        guard let (data, filename) = await fetchBytes(entry, client: client) else { return }
 
         if folder.isBound {
             do {
-                try folder.write(data: data, filename: filename)
+                // Prefer overwriting the original in place (preserving its nested
+                // subfolder) when exactly one enumerated file matches the name;
+                // otherwise drop it at the folder's top level.
+                let matches = folderFiles.filter { $0.name == filename }
+                if let existing = matches.first, matches.count == 1 {
+                    try folder.write(data: data, to: existing)
+                } else {
+                    try folder.write(data: data, filename: filename)
+                }
                 statuses[entry.id] = .saved
                 refreshFolder(folder)
             } catch {
@@ -357,7 +439,7 @@ final class AUMSessionsModel: ObservableObject {
             switch urlError.code {
             case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost,
                  .notConnectedToInternet, .timedOut, .dnsLookupFailed:
-                return "daemon unreachable — check the host and that it's running"
+                return "mcp-midi-controller unreachable — check the host and that it's running"
             default:
                 break
             }

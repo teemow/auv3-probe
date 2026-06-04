@@ -240,7 +240,7 @@ struct AudioUnitInspectorView: View {
 
     private var privacyNote: some View {
         Label {
-            Text("user-preset names are installation-specific. they only leave this device when you send to your own lan daemon — never committed to git.")
+            Text("user-preset names are installation-specific. they only leave this device when you send to your own mcp-midi-controller on the lan — never committed to git.")
         } icon: {
             Image(systemName: "lock.shield")
         }

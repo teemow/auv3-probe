@@ -181,7 +181,10 @@ struct AUMArchive {
         }
         sortMappings(&mappings)
 
-        return AUMSessionMap(version: version, tempo: tempo, channels: channels, mappings: mappings)
+        let routes = parseRoutes(rootDict)
+
+        return AUMSessionMap(version: version, tempo: tempo, channels: channels,
+                             mappings: mappings, routes: routes)
     }
 
     private func midiMapAsSessionMap(_ rootDict: [String: PlistValue]) -> AUMSessionMap {
@@ -192,7 +195,8 @@ struct AUMArchive {
             mappings.append(leaf)
         }
         sortMappings(&mappings)
-        return AUMSessionMap(version: intOr(rootDict["version"], 0), tempo: nil, channels: [], mappings: mappings)
+        return AUMSessionMap(version: intOr(rootDict["version"], 0), tempo: nil,
+                             channels: [], mappings: mappings, routes: [])
     }
 
     private func channelKind(_ stripRef: PlistValue) -> String {
@@ -207,19 +211,103 @@ struct AUMArchive {
         var out = [NodeInfo]()
         for (slot, ev) in array(v).enumerated() {
             guard let obj = dict(ev) else { continue }
+            let descClass = nonEmpty(str(obj["archiveDescClass"]))
+            let componentName = nonEmpty(str(obj["componentName"]))
+            let component = decodeComponent(obj["audioComponentDescription"])
+
+            // Drop empty slots: AUM pads each chain with placeholder nodes that
+            // carry no class, component or name. They add only noise ("node 3").
+            if descClass == nil && component == nil && componentName == nil { continue }
+
             var auMainParam: String?
             if let state = dict(obj["archiveNodeState"]) {
                 auMainParam = nonEmpty(str(state["AuMainParam"]))
             }
             out.append(NodeInfo(
                 slot: slot,
-                archiveDescClass: nonEmpty(str(obj["archiveDescClass"])),
-                componentName: nonEmpty(str(obj["componentName"])),
-                component: decodeComponent(obj["audioComponentDescription"]),
-                auMainParam: auMainParam
+                archiveDescClass: descClass,
+                componentName: componentName,
+                component: component,
+                auMainParam: auMainParam,
+                busIndex: optInt(obj["busIndex"]),
+                hwBusIndex: optInt(obj["hwBusIndex"]),
+                monoSelect: optInt(obj["monoSelect"])
             ))
         }
         return out
+    }
+
+    /// Resolve `v` to an Int only when it is actually present as a number.
+    private func optInt(_ v: PlistValue?) -> Int? {
+        switch deref(v) {
+        case .int(let i): return Int(i)
+        case .real(let f): return Int(f)
+        default: return nil
+        }
+    }
+
+    // MARK: - MIDI routing (midiMatrixState)
+
+    /// Parse AUM's MIDI routing matrix into source→destination edges. The matrix
+    /// is `connections` (source key → [destination keys]) plus `sourcesInfo` /
+    /// `destsInfo` ([displayName, category, …] per endpoint) and user
+    /// `customNames`.
+    private func parseRoutes(_ rootDict: [String: PlistValue]) -> [MidiRoute] {
+        guard let matrix = dict(rootDict["midiMatrixState"]),
+              let connections = dict(matrix["connections"]) else { return [] }
+        let sourcesInfo = dict(matrix["sourcesInfo"]) ?? [:]
+        let destsInfo = dict(matrix["destsInfo"]) ?? [:]
+        let customNames = dict(matrix["customNames"]) ?? [:]
+
+        var routes = [MidiRoute]()
+        for (srcKey, destsRef) in connections {
+            let src = endpoint(key: srcKey, info: sourcesInfo[srcKey], custom: customNames[srcKey])
+            for destRef in array(destsRef) {
+                let destKey = str(destRef)
+                guard !destKey.isEmpty else { continue }
+                let dst = endpoint(key: destKey, info: destsInfo[destKey], custom: customNames[destKey])
+                routes.append(MidiRoute(
+                    source: src.name, sourceCategory: src.category,
+                    destination: dst.name, destinationCategory: dst.category
+                ))
+            }
+        }
+        routes.sort {
+            if $0.source != $1.source {
+                return $0.source.localizedCaseInsensitiveCompare($1.source) == .orderedAscending
+            }
+            return $0.destination.localizedCaseInsensitiveCompare($1.destination) == .orderedAscending
+        }
+        return routes
+    }
+
+    /// Resolve an endpoint's display name + category from its info array
+    /// (`[name, category, …]`), a user custom name, or — as a last resort — the
+    /// `Type:Name` key itself.
+    private func endpoint(key: String, info: PlistValue?, custom: PlistValue?) -> (name: String, category: String) {
+        let infoArr = array(info)
+        var name = infoArr.count > 0 ? str(infoArr[0]) : ""
+        let category = infoArr.count > 1 ? str(infoArr[1]) : ""
+        let customName = str(custom)
+        if !customName.isEmpty { name = customName }
+        if name.isEmpty {
+            if let colon = key.firstIndex(of: ":") {
+                name = String(key[key.index(after: colon)...])
+                return (name, category.isEmpty ? endpointType(String(key[..<colon])) : category)
+            }
+            name = key
+        }
+        return (name, category)
+    }
+
+    /// Friendly label for an endpoint key prefix (used only when info/category
+    /// is missing).
+    private func endpointType(_ prefix: String) -> String {
+        switch prefix {
+        case "BuiltIn": return "Built-in"
+        case "CoreMIDISrc", "CoreMIDIDest", "CoreMIDIDst": return "MIDI"
+        default: return prefix
+        }
     }
 
     /// Decode a 20-byte audioComponentDescription blob into a {type, subtype,

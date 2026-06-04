@@ -18,14 +18,26 @@ import UIKit
 // bookmark is stored on-device only; nothing here (paths, filenames) is ever
 // logged or committed (public-repo / privacy rule).
 
-/// One AUM file discovered inside the bound folder.
+/// One AUM file discovered inside the bound folder (at any depth — AUM nests
+/// sessions in subfolders, and subfolders of subfolders).
 struct AUMFolderFile: Identifiable, Equatable {
     let url: URL
+    /// The filename, e.g. `Set.aumproj`.
     let name: String
+    /// The file's path relative to the linked folder root, e.g.
+    /// `Live sets/Set.aumproj`. Used to disambiguate same-named files in
+    /// different subfolders.
+    let relativePath: String
     let bytes: Int
+    /// Last-modified timestamp from the filesystem, when available.
+    let modified: Date?
 
     var id: String { url.path }
     var isMidiMap: Bool { name.lowercased().hasSuffix(".aum_midimap") }
+
+    /// The containing subfolder relative to the linked root, or "" when the file
+    /// sits at the top level.
+    var subfolder: String { (relativePath as NSString).deletingLastPathComponent }
 }
 
 enum AUMFolderError: LocalizedError {
@@ -107,20 +119,48 @@ final class AUMFolderBookmark: ObservableObject {
     /// name. Throws `AUMFolderError` when nothing is linked or access fails.
     func listFiles() throws -> [AUMFolderFile] {
         try withFolder { folder in
-            let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
-            let contents = try FileManager.default.contentsOfDirectory(
+            // AUM's folder is a tree (sessions live in nested subfolders), so walk
+            // it recursively. .aumproj / .aum_midimap are flat bplist files, so
+            // skip package descendants to avoid recursing into unrelated bundles.
+            let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey, .contentModificationDateKey]
+            guard let walker = FileManager.default.enumerator(
                 at: folder,
                 includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles]
-            )
-            return contents.compactMap { url -> AUMFolderFile? in
-                let ext = url.pathExtension.lowercased()
-                guard ext == "aumproj" || ext == "aum_midimap" else { return nil }
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                return AUMFolderFile(url: url, name: url.lastPathComponent, bytes: size)
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else {
+                return []
             }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            let rootPath = folder.standardizedFileURL.path
+
+            var files: [AUMFolderFile] = []
+            for case let url as URL in walker {
+                let ext = url.pathExtension.lowercased()
+                guard ext == "aumproj" || ext == "aum_midimap" else { continue }
+                let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .contentModificationDateKey])
+                if values?.isRegularFile == false { continue }
+                let size = values?.fileSize ?? 0
+                files.append(AUMFolderFile(
+                    url: url,
+                    name: url.lastPathComponent,
+                    relativePath: Self.relativePath(of: url, underRoot: rootPath),
+                    bytes: size,
+                    modified: values?.contentModificationDate
+                ))
+            }
+            return files.sorted {
+                $0.relativePath.localizedCaseInsensitiveCompare($1.relativePath) == .orderedAscending
+            }
         }
+    }
+
+    /// The path of `url` relative to `rootPath`, falling back to the bare
+    /// filename when `url` is not under the root.
+    private static func relativePath(of url: URL, underRoot rootPath: String) -> String {
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(rootPath) else { return url.lastPathComponent }
+        var rel = String(path.dropFirst(rootPath.count))
+        while rel.hasPrefix("/") { rel.removeFirst() }
+        return rel.isEmpty ? url.lastPathComponent : rel
     }
 
     /// Read a file enumerated from the bound folder (verbatim bytes).
@@ -128,14 +168,43 @@ final class AUMFolderBookmark: ObservableObject {
         try withFolder { _ in try Data(contentsOf: file.url) }
     }
 
-    /// Write `data` into the bound folder under `filename`, overwriting any
-    /// existing file. Returns the destination URL.
+    /// Write `data` into the top level of the bound folder under `filename`,
+    /// overwriting any existing file. Returns the destination URL.
     @discardableResult
     func write(data: Data, filename: String) throws -> URL {
         try withFolder { folder in
             let dest = folder.appendingPathComponent(filename)
             try data.write(to: dest, options: .atomic)
             return dest
+        }
+    }
+
+    /// Write `data` under `filename` into `subfolder` (a path relative to the
+    /// bound root, e.g. `Live sets`; "" means the root). Creates the subfolder if
+    /// it doesn't exist yet, and overwrites any same-named file. Returns the URL.
+    @discardableResult
+    func write(data: Data, filename: String, subfolder: String) throws -> URL {
+        try withFolder { folder in
+            var dir = folder
+            let trimmed = subfolder.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            if !trimmed.isEmpty {
+                dir = folder.appendingPathComponent(trimmed, isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            let dest = dir.appendingPathComponent(filename)
+            try data.write(to: dest, options: .atomic)
+            return dest
+        }
+    }
+
+    /// Overwrite a specific enumerated file in place, preserving its (possibly
+    /// nested) location in the AUM tree. Used for write-back round-trips so an
+    /// edited session lands back in the subfolder it came from.
+    @discardableResult
+    func write(data: Data, to file: AUMFolderFile) throws -> URL {
+        try withFolder { _ in
+            try data.write(to: file.url, options: .atomic)
+            return file.url
         }
     }
 
