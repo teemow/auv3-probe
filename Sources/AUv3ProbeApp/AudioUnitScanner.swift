@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import ProbeKit
 
 // AudioUnitScanner enumerates the AUv3 audio units installed on the device and,
 // for a chosen one, reads its AUParameterTree + metadata into an
@@ -271,22 +272,5 @@ enum AudioUnitScanner {
         case .customUnit: return "customUnit"
         @unknown default: return "generic"
         }
-    }
-}
-
-extension FourCharCode {
-    /// Render a FourCharCode (`OSType`) as its 4-character string (e.g. "aumu").
-    /// Non-printable bytes become "?" so the output stays human-readable.
-    static func string(from code: FourCharCode) -> String {
-        let bytes = [
-            UInt8((code >> 24) & 0xFF),
-            UInt8((code >> 16) & 0xFF),
-            UInt8((code >> 8) & 0xFF),
-            UInt8(code & 0xFF),
-        ]
-        let chars = bytes.map { byte -> Character in
-            (byte >= 0x20 && byte < 0x7F) ? Character(UnicodeScalar(byte)) : "?"
-        }
-        return String(chars)
     }
 }

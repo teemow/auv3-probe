@@ -1,4 +1,5 @@
 import SwiftUI
+import ProbeKit
 
 // RootView is the app shell: a shared daemon-host bar on top (the single Receiver
 // that both flows use) and a TabView switching between the audio-units console

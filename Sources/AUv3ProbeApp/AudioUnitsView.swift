@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import ProbeKit
 
 // The audio-units tab, rendered in the signalwave design language (see
 // docs/signalwave.md): a charcoal "sniffer console" that lists every installed

@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import ProbeKit
 
 // AudioUnitsModel backs the audio-units tab: it discovers installed AUv3s, reads
 // the details (parameters/presets) of the selected ones, and POSTs each record

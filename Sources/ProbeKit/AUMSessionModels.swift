@@ -11,29 +11,33 @@ import Foundation
 //
 // Privacy: titles and node component sets are a private rig snapshot. They are
 // shown in-UI but never logged or committed.
+//
+// Lives in ProbeKit because DaemonClient (shared) returns these types; the
+// app's AUMSessionParser constructs AUMSessionMap and friends, so the inits are
+// public.
 
 /// mcp-midi-controller's JSON reply to a successful `POST /aum-session`: a
 /// compact, non-identifying summary of what the uploaded `.aumproj` decoded to.
 /// Mirrors `aumreceiver.Result` (internal/aumreceiver/receiver.go).
-struct AUMSessionSummary: Codable, Equatable {
+public struct AUMSessionSummary: Codable, Equatable {
     /// Stable id the receiver assigned the staged session.
-    let id: String
+    public let id: String
     /// Human-readable session title decoded from the project (may be empty).
-    let title: String
+    public let title: String
     /// AUM project-format version.
-    let version: Int
+    public let version: Int
     /// Number of mixer channels in the session.
-    let channels: Int
+    public let channels: Int
     /// Number of assigned MIDI mappings in the session.
-    let mappings: Int
+    public let mappings: Int
     /// Size of the staged file in bytes.
-    let bytes: Int
+    public let bytes: Int
 
     enum CodingKeys: String, CodingKey {
         case id, title, version, channels, mappings, bytes
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
@@ -43,7 +47,7 @@ struct AUMSessionSummary: Codable, Equatable {
         bytes = try c.decodeIfPresent(Int.self, forKey: .bytes) ?? 0
     }
 
-    init(id: String, title: String, version: Int, channels: Int, mappings: Int, bytes: Int) {
+    public init(id: String, title: String, version: Int, channels: Int, mappings: Int, bytes: Int) {
         self.id = id
         self.title = title
         self.version = version
@@ -57,41 +61,50 @@ struct AUMSessionSummary: Codable, Equatable {
 /// distinguishes a full session (`.aumproj`) from a standalone MIDI mapping
 /// (`.aum_midimap`). The app's UI model; built from the receiver's manifest or
 /// from a local file (one-off pick / linked folder).
-struct AUMSessionEntry: Equatable, Identifiable {
-    let id: String
+public struct AUMSessionEntry: Equatable, Identifiable {
+    public let id: String
     /// The on-disk filename, used both to download (`GET /aum-session/{file}`)
     /// and to write back into AUM (e.g. `set.aumproj`).
-    let filename: String
+    public let filename: String
     /// `"session"` for a full `.aumproj`, `"midimap"` for a `.aum_midimap`.
-    let kind: String
+    public let kind: String
     /// True when mcp-midi-controller generated this file (vs. a verbatim upload).
-    let generated: Bool
+    public let generated: Bool
     /// File size in bytes.
-    let bytes: Int
+    public let bytes: Int
     /// Last-modified timestamp (RFC3339 string from the receiver), or "".
-    let modified: String
+    public let modified: String
+
+    public init(id: String, filename: String, kind: String, generated: Bool, bytes: Int, modified: String) {
+        self.id = id
+        self.filename = filename
+        self.kind = kind
+        self.generated = generated
+        self.bytes = bytes
+        self.modified = modified
+    }
 
     /// Whether this entry is a standalone MIDI mapping (`.aum_midimap`).
-    var isMidiMap: Bool { kind == "midimap" }
+    public var isMidiMap: Bool { kind == "midimap" }
 }
 
 /// mcp-midi-controller's `GET /aum-session` manifest: every stageable file the
 /// app can pull back. Mirrors `aumreceiver.Manifest` / `ManifestEntry`
 /// (internal/aumreceiver/receiver.go). Decoded here and mapped to
 /// `AUMSessionEntry` for the UI.
-struct AUMSessionManifest: Decodable {
-    struct Entry: Decodable {
-        let id: String
-        let file: String
-        let kind: String
-        let bytes: Int
-        let modified: String?
+public struct AUMSessionManifest: Decodable {
+    public struct Entry: Decodable {
+        public let id: String
+        public let file: String
+        public let kind: String
+        public let bytes: Int
+        public let modified: String?
 
         enum CodingKeys: String, CodingKey {
             case id, file, kind, bytes, modified
         }
 
-        init(from decoder: Decoder) throws {
+        public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
             file = try c.decodeIfPresent(String.self, forKey: .file) ?? ""
@@ -101,7 +114,7 @@ struct AUMSessionManifest: Decodable {
         }
 
         /// Map a manifest entry to the app's UI model.
-        var asEntry: AUMSessionEntry {
+        public var asEntry: AUMSessionEntry {
             AUMSessionEntry(
                 id: id.isEmpty ? file : id,
                 filename: file,
@@ -113,13 +126,13 @@ struct AUMSessionManifest: Decodable {
         }
     }
 
-    let sessions: [Entry]
+    public let sessions: [Entry]
 
     enum CodingKeys: String, CodingKey {
         case sessions
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessions = try c.decodeIfPresent([Entry].self, forKey: .sessions) ?? []
     }
@@ -133,21 +146,21 @@ struct AUMSessionManifest: Decodable {
 // only for convenience (e.g. debug dumps), not because the daemon supplies them.
 
 /// The flat, JSON view of one AUM session.
-struct AUMSessionMap: Codable, Equatable {
-    let version: Int
+public struct AUMSessionMap: Codable, Equatable {
+    public let version: Int
     /// Project tempo in BPM; the Go side omits it when zero.
-    let tempo: Double?
-    let channels: [ChannelInfo]
-    let mappings: [MappingInfo]
+    public let tempo: Double?
+    public let channels: [ChannelInfo]
+    public let mappings: [MappingInfo]
     /// MIDI routing edges (the AUM "MIDI" matrix: source → destination).
-    let routes: [MidiRoute]
+    public let routes: [MidiRoute]
 
     enum CodingKeys: String, CodingKey {
         case version, tempo, channels, mappings, routes
     }
 
     /// Built by the on-device parser (AUMSessionParser).
-    init(version: Int, tempo: Double?, channels: [ChannelInfo], mappings: [MappingInfo], routes: [MidiRoute]) {
+    public init(version: Int, tempo: Double?, channels: [ChannelInfo], mappings: [MappingInfo], routes: [MidiRoute]) {
         self.version = version
         self.tempo = tempo
         self.channels = channels
@@ -155,7 +168,7 @@ struct AUMSessionMap: Codable, Equatable {
         self.routes = routes
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 0
         tempo = try c.decodeIfPresent(Double.self, forKey: .tempo)
@@ -168,24 +181,24 @@ struct AUMSessionMap: Codable, Equatable {
 /// One MIDI routing edge from AUM's `midiMatrixState`: a source endpoint wired
 /// to a destination endpoint (e.g. "nanoKEY Studio Bluetooth" → "MIDI Control").
 /// Endpoint names are installation-specific (hardware on the rig).
-struct MidiRoute: Codable, Equatable {
-    let source: String
-    let sourceCategory: String
-    let destination: String
-    let destinationCategory: String
+public struct MidiRoute: Codable, Equatable {
+    public let source: String
+    public let sourceCategory: String
+    public let destination: String
+    public let destinationCategory: String
 
     enum CodingKeys: String, CodingKey {
         case source, sourceCategory, destination, destinationCategory
     }
 
-    init(source: String, sourceCategory: String, destination: String, destinationCategory: String) {
+    public init(source: String, sourceCategory: String, destination: String, destinationCategory: String) {
         self.source = source
         self.sourceCategory = sourceCategory
         self.destination = destination
         self.destinationCategory = destinationCategory
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
         sourceCategory = try c.decodeIfPresent(String.self, forKey: .sourceCategory) ?? ""
@@ -195,25 +208,25 @@ struct MidiRoute: Codable, Equatable {
 }
 
 /// One mixer strip in an AUMSessionMap.
-struct ChannelInfo: Codable, Equatable, Identifiable {
-    let index: Int
+public struct ChannelInfo: Codable, Equatable, Identifiable {
+    public let index: Int
     /// Strip kind (e.g. AUM's channel/bus/master tokens).
-    let kind: String
-    let title: String?
+    public let kind: String
+    public let title: String?
     /// Fader level; the Go side uses a pointer so it can be absent.
-    let faderLevel: Double?
-    let muted: Bool
-    let soloed: Bool
-    let nodes: [NodeInfo]?
+    public let faderLevel: Double?
+    public let muted: Bool
+    public let soloed: Bool
+    public let nodes: [NodeInfo]?
 
-    var id: Int { index }
+    public var id: Int { index }
 
     enum CodingKeys: String, CodingKey {
         case index, kind, title, faderLevel, muted, soloed, nodes
     }
 
-    init(index: Int, kind: String, title: String?, faderLevel: Double?,
-         muted: Bool, soloed: Bool, nodes: [NodeInfo]?) {
+    public init(index: Int, kind: String, title: String?, faderLevel: Double?,
+                muted: Bool, soloed: Bool, nodes: [NodeInfo]?) {
         self.index = index
         self.kind = kind
         self.title = title
@@ -223,7 +236,7 @@ struct ChannelInfo: Codable, Equatable, Identifiable {
         self.nodes = nodes
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         index = try c.decodeIfPresent(Int.self, forKey: .index) ?? 0
         kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
@@ -237,29 +250,29 @@ struct ChannelInfo: Codable, Equatable, Identifiable {
 
 /// One plugin/processing node on a channel. `component` is present only for AUv3
 /// nodes (reusing the same AudioUnitComponent identity the audio-unit scan reads).
-struct NodeInfo: Codable, Equatable, Identifiable {
-    let slot: Int
-    let archiveDescClass: String?
-    let componentName: String?
-    let component: AudioUnitComponent?
-    let auMainParam: String?
+public struct NodeInfo: Codable, Equatable, Identifiable {
+    public let slot: Int
+    public let archiveDescClass: String?
+    public let componentName: String?
+    public let component: AudioUnitComponent?
+    public let auMainParam: String?
     /// For internal-bus nodes (Bus source/dest/send): the AUM bus index.
-    let busIndex: Int?
+    public let busIndex: Int?
     /// For hardware-I/O nodes (HW input/output): the hardware bus index.
-    let hwBusIndex: Int?
+    public let hwBusIndex: Int?
     /// For hardware-I/O nodes: mono/stereo channel select (0 = stereo).
-    let monoSelect: Int?
+    public let monoSelect: Int?
 
-    var id: Int { slot }
+    public var id: Int { slot }
 
     enum CodingKeys: String, CodingKey {
         case slot, archiveDescClass, componentName, component, auMainParam
         case busIndex, hwBusIndex, monoSelect
     }
 
-    init(slot: Int, archiveDescClass: String?, componentName: String?,
-         component: AudioUnitComponent?, auMainParam: String?,
-         busIndex: Int?, hwBusIndex: Int?, monoSelect: Int?) {
+    public init(slot: Int, archiveDescClass: String?, componentName: String?,
+                component: AudioUnitComponent?, auMainParam: String?,
+                busIndex: Int?, hwBusIndex: Int?, monoSelect: Int?) {
         self.slot = slot
         self.archiveDescClass = archiveDescClass
         self.componentName = componentName
@@ -270,7 +283,7 @@ struct NodeInfo: Codable, Equatable, Identifiable {
         self.monoSelect = monoSelect
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         slot = try c.decodeIfPresent(Int.self, forKey: .slot) ?? 0
         archiveDescClass = try c.decodeIfPresent(String.self, forKey: .archiveDescClass)
@@ -283,30 +296,30 @@ struct NodeInfo: Codable, Equatable, Identifiable {
     }
 
     /// True when this node is a hosted AUv3 plugin (vs. an AUM built-in).
-    var isPlugin: Bool { component != nil || (componentName?.isEmpty == false) }
+    public var isPlugin: Bool { component != nil || (componentName?.isEmpty == false) }
 }
 
 /// One flattened mapping leaf in an AUMSessionMap (an assigned MIDI control).
-struct MappingInfo: Codable, Equatable, Identifiable {
-    let collection: String
-    let target: String
-    let type: Int
-    let data1: Int
-    let channel: Int
-    let min: Double
-    let max: Double
-    let autoToggle: Bool
-    let enabled: Bool
+public struct MappingInfo: Codable, Equatable, Identifiable {
+    public let collection: String
+    public let target: String
+    public let type: Int
+    public let data1: Int
+    public let channel: Int
+    public let min: Double
+    public let max: Double
+    public let autoToggle: Bool
+    public let enabled: Bool
 
     /// Synthesized stable id for SwiftUI lists (mappings have no natural key).
-    var id: String { "\(collection)/\(target)/\(type)/\(data1)/\(channel)" }
+    public var id: String { "\(collection)/\(target)/\(type)/\(data1)/\(channel)" }
 
     enum CodingKeys: String, CodingKey {
         case collection, target, type, data1, channel, min, max, autoToggle, enabled
     }
 
-    init(collection: String, target: String, type: Int, data1: Int, channel: Int,
-         min: Double, max: Double, autoToggle: Bool, enabled: Bool) {
+    public init(collection: String, target: String, type: Int, data1: Int, channel: Int,
+                min: Double, max: Double, autoToggle: Bool, enabled: Bool) {
         self.collection = collection
         self.target = target
         self.type = type
@@ -318,7 +331,7 @@ struct MappingInfo: Codable, Equatable, Identifiable {
         self.enabled = enabled
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         collection = try c.decodeIfPresent(String.self, forKey: .collection) ?? ""
         target = try c.decodeIfPresent(String.self, forKey: .target) ?? ""

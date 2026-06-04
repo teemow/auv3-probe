@@ -29,9 +29,12 @@ device*. Four jobs, in the order they are being built:
    I/O + transfer; the laptop owns the `NSKeyedArchiver` (de)serialization — the
    Go tools cannot touch a session without the iPad online to fetch/push the
    file, and the app never re-encodes the bytes (it has no parser).
-3. **Run inside AUM.** Ship as an AUv3 extension so the app lives *in* the host
-   process, not just beside it — the path toward a scriptable on-device surface.
-4. **Assist "threefoot".** Help the pedalboard footswitch load scenes or songs.
+3. **Run inside AUM.** Ship as **two AUv3 app extensions** (ProbeMidiBrain, an
+   `aumi` MIDI processor; ProbeAudioTap, an `aufx` audio tap) so the app lives
+   *in* the host process, not just beside it — the path toward a scriptable
+   on-device surface. See [auv3-extension.md](auv3-extension.md).
+4. **Assist "threefoot".** Help the pedalboard footswitch load scenes or songs
+   (ProbeMidiBrain's footswitch→scene mapping is the first step).
 
 The app is one shell (`RootView`) with a shared daemon-host bar over a `TabView`:
 an **audio-units** tab (job 1) and an **AUM-sessions** tab (job 2). Both talk to
@@ -253,33 +256,54 @@ re-encode, so the Go plist round-trip is the only transform a session ever sees.
 
 ## Source layout
 
+`Sources/` is split into one directory per build target (SwiftPM / xtool require
+this), shared by both build systems:
+
+- **`Sources/ProbeKit/`** — shared library used by the app *and* the two AUv3
+  extensions (job 3): the design system, LAN client, data contracts, and
+  realtime AUv3 helpers.
+- **`Sources/AUv3ProbeApp/`** — the container app (`@main`), jobs 1 + 2.
+- **`Sources/ProbeMidiBrain/`** / **`Sources/ProbeAudioTap/`** — the two AUv3 app
+  extensions. See [auv3-extension.md](auv3-extension.md).
+
 | File | Role |
 |------|------|
-| `Sources/AUv3ProbeApp.swift` | `@main` SwiftUI `App` entry point; shows `RootView`. |
-| `Sources/RootView.swift` | App shell: shared daemon-host bar + `TabView` (audio units \| AUM sessions); owns and injects the `Receiver`. |
-| `Sources/Receiver.swift` | Shared connection state: daemon `host` (persisted in `UserDefaults`), `healthz` test, and the `DaemonClient` factory. Injected as an `EnvironmentObject`. |
-| `Sources/DaemonClient.swift` | The single LAN client to the daemon: audio-unit POSTs (`/auv3-probe`, `/auv3-probe/diagnostics`), AUM-session upload/list/download/map, and `/healthz`; `DaemonError`. |
-| `Sources/Theme.swift` | The **signalwave** design system: palette (`Signalwave.*`), monospaced fonts, the `WaveGlyph`, button styles, field + section-header surfaces, and the shared `SignalChip` / `FlowChips` / `WrapLayout`. |
+| **ProbeKit (shared)** | |
+| `Sources/ProbeKit/Theme.swift` | The **signalwave** design system: palette (`Signalwave.*`), monospaced fonts, the `WaveGlyph`, button styles, field + section-header surfaces, and the shared `SignalChip` / `FlowChips` / `WrapLayout`. Public so the extensions' UIs reuse it. |
+| `Sources/ProbeKit/Receiver.swift` | Shared connection state: daemon `host` (persisted in `UserDefaults`), `healthz` test, and the `DaemonClient` factory. Injected as an `EnvironmentObject`. |
+| `Sources/ProbeKit/DaemonClient.swift` | The single LAN client to the daemon: audio-unit POSTs (`/auv3-probe`, `/auv3-probe/diagnostics`), AUM-session upload/list/download/map, `/healthz`, and `webSocketURL(path:)` (used by ProbeAudioTap); `DaemonError`. |
+| `Sources/ProbeKit/AudioUnitDetails.swift` | The cross-repo JSON schema mirror (`AudioUnitDetails` / `AudioUnitComponent` / `ParameterInfo` / `PresetInfo`) + scan report types (`ScanReport` / `ScanResult` / `ScanDevice`) + `fileID` / `sanitizeID`. |
+| `Sources/ProbeKit/AUMSessionModels.swift` | The cross-repo JSON mirror for the session endpoints (`AUMSessionSummary` / `AUMSessionEntry`) and the parsed map (`AUMSessionMap` / `ChannelInfo` / `NodeInfo` / `MappingInfo`). |
+| `Sources/ProbeKit/FourCC.swift` | `FourCharCode` ↔ `String` helpers (shared by the scanner and the extensions' AudioComponent identity). |
+| `Sources/ProbeKit/RealtimeRing.swift` | Lock-free single-producer/single-consumer `Float` ring buffer (swift-atomics) for the audio tap's render thread. |
+| `Sources/ProbeKit/MIDISupport.swift` | Allocation-free MIDI 1.0 parse/encode helpers (`MidiMessage` / `MidiEncoder`) for the realtime path. |
+| `Sources/ProbeKit/SongStructure.swift` | The brain's model + evaluator (`SongSection` / `FootswitchMapping` / `BrainProgram`). |
+| **App entry (jobs 1+2)** | |
+| `Sources/AUv3ProbeApp/AUv3ProbeApp.swift` | `@main` SwiftUI `App` entry point; shows `RootView`. |
+| `Sources/AUv3ProbeApp/RootView.swift` | App shell: shared daemon-host bar + `TabView` (audio units \| AUM sessions); owns and injects the `Receiver`. |
 | **Audio units (job 1)** | |
-| `Sources/AudioUnitScanner.swift` | AUv3 enumeration + `AUParameterTree` → `AudioUnitDetails` mapping (`discover()` / `readDetails(_:)`); `FourCharCode` ↔ string; `DiscoveredAudioUnit`; `AudioUnitError`. |
-| `Sources/AudioUnitDetails.swift` | The cross-repo JSON schema mirror (`AudioUnitDetails` / `AudioUnitComponent` / `ParameterInfo` / `PresetInfo`) + scan report types (`ScanReport` / `ScanResult` / `ScanDevice`) + `fileID` / `sanitizeID`. |
-| `Sources/AudioUnitsModel.swift` | `ObservableObject` state + orchestration (discover, read single/batch, send, inspect, export); `AudioUnitRowStatus`; `AudioUnitDetailsDocument` for Save-to-Files. |
-| `Sources/AudioUnitsView.swift` | The audio-units **signalwave** console: header + rescan, inline filter, a capture-style multi-select list with split arm/inspect tap targets, a fixed bottom action bar (read & send + run summary), per-row Save-to-Files, and the inspector `.sheet`. |
-| `Sources/AudioUnitInspectorView.swift` | The tap-to-inspect overlay rendering one `AudioUnitDetails` (header, summary, privacy note, group-sectioned lazy parameter list, presets, raw JSON). |
+| `Sources/AUv3ProbeApp/AudioUnitScanner.swift` | AUv3 enumeration + `AUParameterTree` → `AudioUnitDetails` mapping (`discover()` / `readDetails(_:)`); `DiscoveredAudioUnit`; `AudioUnitError`. |
+| `Sources/AUv3ProbeApp/AudioUnitsModel.swift` | `ObservableObject` state + orchestration (discover, read single/batch, send, inspect, export); `AudioUnitRowStatus`; `AudioUnitDetailsDocument` for Save-to-Files. |
+| `Sources/AUv3ProbeApp/AudioUnitsView.swift` | The audio-units **signalwave** console: header + rescan, inline filter, a capture-style multi-select list with split arm/inspect tap targets, a fixed bottom action bar (read & send + run summary), per-row Save-to-Files, and the inspector `.sheet`. |
+| `Sources/AUv3ProbeApp/AudioUnitInspectorView.swift` | The tap-to-inspect overlay rendering one `AudioUnitDetails` (header, summary, privacy note, group-sectioned lazy parameter list, presets, raw JSON). |
 | **AUM sessions (job 2)** | |
-| `Sources/AUMSessionModels.swift` | The cross-repo JSON mirror for the session endpoints (`AUMSessionSummary` / `AUMSessionEntry`) and the parsed map (`AUMSessionMap` / `ChannelInfo` / `NodeInfo` / `MappingInfo`). |
-| `Sources/AUMFileDocument.swift` | A raw-`Data` `FileDocument` for verbatim `.fileExporter` write-back; `.aumproj` / `.aum_midimap` UTType declarations. |
-| `Sources/AUMSessionsModel.swift` | `ObservableObject` state (upload, manifest, download/export, inspect); `AUMSessionRowStatus`. |
-| `Sources/AUMSessionsView.swift` | The AUM-sessions **signalwave** ferry: upload `.aumproj`, manifest list with per-row inspect + download, and the inspector `.sheet`. |
-| `Sources/AUMSessionInspectorView.swift` | The inspector rendering one `AUMSessionMap` (header, summary, channel→node tree, mappings, raw JSON). |
+| `Sources/AUv3ProbeApp/BinaryPlist.swift` / `AUMSessionParser.swift` | On-device read-only NSKeyedArchiver binary-plist decoder + the `.aumproj` → `AUMSessionMap` parser. |
+| `Sources/AUv3ProbeApp/AUMFolderBookmark.swift` | Security-scoped bookmark for the linked AUM folder. |
+| `Sources/AUv3ProbeApp/AUMSessionsModel.swift` | `ObservableObject` state (upload, manifest, download/export, inspect); `AUMSessionRowStatus`. |
+| `Sources/AUv3ProbeApp/AUMSessionsView.swift` | The AUM-sessions **signalwave** ferry: upload `.aumproj`, manifest list with per-row inspect + download, and the inspector `.sheet`. |
+| `Sources/AUv3ProbeApp/AUMSessionInspectorView.swift` | The inspector rendering one `AUMSessionMap` (header, summary, channel→node tree, mappings, raw JSON). |
+| **AUv3 extensions (job 3)** | see [auv3-extension.md](auv3-extension.md) |
+| `Sources/ProbeMidiBrain/` | `aumi` MIDI processor: `ProbeMidiBrainAU` (AU) + `BrainEngine` (realtime core) + `ProbeMidiBrainViewController` (factory) + `ProbeMidiBrainView` (authoring UI). |
+| `Sources/ProbeAudioTap/` | `aufx` audio tap: `ProbeAudioTapAU` (AU) + `TapDSP` (realtime core) + `TapStreamer` (WebSocket) + `ProbeAudioTapViewController` (factory) + `ProbeAudioTapView` (control UI). |
 | **Build** | |
 | `Resources/Info.plist` | Local-network usage string + ATS local-networking allowance; orientations (macOS/XcodeGen build). |
 | `Resources/AUv3Probe.entitlements` | `inter-app-audio` — the gate for third-party AUv3 discovery (shared by both build paths). |
 | `Makefile` | Single entry point for both build paths: `make build` (macOS/Xcode), `make deploy` / `xtool-build` / `devices` (Linux/xtool), `make help`. |
-| `project.yml` | XcodeGen project definition for the macOS build (the `.xcodeproj` is generated, never committed). |
-| `Package.swift` | SwiftPM manifest for the Linux/xtool build; its target `path: "Sources"` reuses the same sources as the XcodeGen build. |
-| `xtool.yml` | xtool config (bundle id, info/entitlements/icon paths) for the Linux build. |
-| `xtool-Info.plist` | xtool's `Info.plist` (the canonical `Resources/Info.plist` uses XcodeGen `$(...)` vars xtool can't resolve). |
+| `project.yml` | XcodeGen project definition for the macOS build: the `ProbeKit` framework, the app, and the two `app-extension` targets (their `NSExtension`/`AudioComponents` plists are generated from `info.properties`). The `.xcodeproj` is generated, never committed. |
+| `Package.swift` | SwiftPM manifest for the Linux/xtool build: four targets (one dir each) + the swift-atomics dependency; reuses the same `Sources/`. |
+| `xtool.yml` | xtool config: `product: AUv3ProbeApp` + an `extensions:` entry per AU. |
+| `xtool-Info.plist` | xtool's app `Info.plist` (the canonical `Resources/Info.plist` uses XcodeGen `$(...)` vars xtool can't resolve). |
+| `Extensions/*-Info.plist` | The literal extension `Info.plist`s (NSExtension/AudioComponents) used by the xtool path. |
 
 ## Key design decisions
 
@@ -453,11 +477,14 @@ is gitignored.
   LAN transfer; the `NSKeyedArchiver` (de)serialization lives in the
   orchestrator's Go `internal/aum` library. See the main repo's
   `docs/research/aum-session.md`.
-- **Job 3 (run inside AUM):** shipping as an AUv3 extension is the path toward a
-  scriptable on-device host — the **north star** of a daemon-driven AUv3 host
-  (we *are* the host, exposing set-by-address + read-back + enumerate over
-  OSC/WebSocket) that would allow true bidirectional verify. Recorded in the main
-  repo's `docs/research/auv3-feedback.md` (option 5).
+- **Job 3 (run inside AUM):** shipping as **two AUv3 app extensions**
+  (ProbeMidiBrain + ProbeAudioTap) is the path toward a scriptable on-device host
+  — the **north star** of a daemon-driven AUv3 host (we *are* the host, exposing
+  set-by-address + read-back + enumerate over OSC/WebSocket) that would allow true
+  bidirectional verify. The audio tap's PCM/feature stream is the first "ears"
+  feedback loop. Architecture, AUM routing recipes, the realtime-safety model, and
+  the audio-stream wire contract are in [auv3-extension.md](auv3-extension.md);
+  recorded in the main repo's `docs/research/auv3-feedback.md` (option 5).
 - **Job 4 (assist "threefoot"):** the iPad helping the pedalboard footswitch
   load scenes/songs is a rig-integration goal, not yet designed here.
 

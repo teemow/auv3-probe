@@ -32,9 +32,17 @@ Its remit is growing into the iPad's permanent role in the rig:
 2. **Read/write AUM sessions** — move `.aumproj` files on/off the device over the
    LAN so the orchestrator's Go `internal/aum` library can read, diff, and author
    them (shipping). The iPad owns the file I/O; the laptop owns the format.
-3. **Run inside AUM** — ship as an AUv3 extension so the app lives *in* the host,
-   not just beside it.
-4. **Assist "threefoot"** — help the pedalboard footswitch load scenes or songs.
+3. **Run inside AUM** — ship as **two AUv3 app extensions** so the app lives *in*
+   the host process, not just beside it (in progress):
+   - **ProbeMidiBrain** (`aumi`) — a MIDI processor that drives scene/session
+     changes from the song structure (host transport) and the "threefoot"
+     footswitch.
+   - **ProbeAudioTap** (`aufx`) — a transparent audio tap that streams downsampled
+     PCM + RMS/peak to the orchestrator, giving an AI agent "ears".
+
+   See [docs/auv3-extension.md](docs/auv3-extension.md).
+4. **Assist "threefoot"** — help the pedalboard footswitch load scenes or songs
+   (ProbeMidiBrain is the first step toward this).
 
 ## What it produces
 
@@ -87,6 +95,18 @@ The app declares the **Inter-App Audio** capability (`inter-app-audio` in
 `AVAudioUnitComponentManager` only returns Apple's built-in Audio Units and
 hides every third-party AUv3. It works with a free Apple ID. See
 [docs/auv3-discovery.md](docs/auv3-discovery.md) for the full explanation.
+
+## Running inside AUM (AUv3 extensions)
+
+The app ships two AUv3 app extensions hosted by the container app:
+**ProbeMidiBrain** (a `aumi` MIDI processor that emits scene-change MIDI from the
+song structure + footswitch) and **ProbeAudioTap** (a `aufx` transparent tap that
+streams PCM + features to `mcp-midi-controller`). The sources live in
+`Sources/ProbeMidiBrain/` and `Sources/ProbeAudioTap/`, with shared code in
+`Sources/ProbeKit/`. Both build paths below produce the app with the two
+`.appex` plugins embedded. AUM routing recipes, the realtime-safety model, and
+the audio-stream wire contract are in
+[docs/auv3-extension.md](docs/auv3-extension.md).
 
 ## Building (on a Mac)
 

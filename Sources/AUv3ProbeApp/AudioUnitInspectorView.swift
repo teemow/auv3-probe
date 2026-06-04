@@ -1,4 +1,5 @@
 import SwiftUI
+import ProbeKit
 
 // AudioUnitInspectorView renders one audio unit's details (AudioUnitDetails) —
 // the exact bytes a batch send would POST — in the signalwave design language

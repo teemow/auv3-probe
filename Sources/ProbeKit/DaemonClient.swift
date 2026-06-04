@@ -14,6 +14,8 @@ import Foundation
 //     GET    /aum-session/{file}      — one file's raw bytes (to write into AUM)
 //     DELETE /aum-session/{file}      — remove one staged file (controller-side)
 //     DELETE /aum-session             — clear all staged files (controller-side)
+//   Audio tap (AUv3 effect, internal/auv3receiver):
+//     WS   /audio-stream            — live downsampled PCM + features (ProbeAudioTap)
 //   Shared:
 //     GET  /healthz                 — connectivity test, run first
 //
@@ -22,13 +24,16 @@ import Foundation
 // reads and inspects .aumproj/.aum_midimap on-device (AUMSessionParser), and only
 // uses these endpoints to hand files to / pull files from mcp-midi-controller.
 // Uploads/downloads move the exact bytes (no JSON re-encoding).
+//
+// Lives in ProbeKit so the ProbeAudioTap extension reuses the same host parsing
+// (its `webSocketURL(path:)` builds the streaming endpoint from the same host).
 
-enum DaemonError: LocalizedError {
+public enum DaemonError: LocalizedError {
     case badHost(String)
     case notOK(Int, String)
     case healthzFailed(Int)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .badHost(let h):
             return "could not parse host \"\(h)\" (try host:7800)"
@@ -41,19 +46,19 @@ enum DaemonError: LocalizedError {
     }
 }
 
-struct DaemonClient {
-    let baseURL: URL
+public struct DaemonClient {
+    public let baseURL: URL
 
     /// The daemon's default LAN bind port (`-listen :7800`).
-    static let defaultPort = 7800
+    public static let defaultPort = 7800
 
     /// Sessions can be multiple MB, so file transfers get a generous timeout;
     /// the small JSON calls (audio-unit POST, manifest, healthz) stay snappy.
-    static let transferTimeout: TimeInterval = 120
+    public static let transferTimeout: TimeInterval = 120
 
     /// RFC3339 formatter used to ship a file's original modified time on upload,
     /// matching `time.RFC3339` on the receiver.
-    static let rfc3339: ISO8601DateFormatter = {
+    public static let rfc3339: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         return f
@@ -62,7 +67,7 @@ struct DaemonClient {
     /// Build a client from a user-entered `host`, `host:port`, or full URL.
     /// Defaults to the `http` scheme and port 7800 when omitted. No endpoint is
     /// ever committed — the host is always supplied at runtime.
-    init?(host rawHost: String) {
+    public init?(host rawHost: String) {
         let trimmed = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -78,10 +83,25 @@ struct DaemonClient {
         self.baseURL = url
     }
 
+    /// The WebSocket URL for a given path on the same host (e.g. `audio-stream`),
+    /// translating `http`/`https` to `ws`/`wss`. Used by ProbeAudioTap to stream
+    /// to the same receiver the app's host bar points at.
+    public func webSocketURL(path: String) -> URL? {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        switch components.scheme {
+        case "https": components.scheme = "wss"
+        default: components.scheme = "ws"
+        }
+        components.path = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return components.url
+    }
+
     // MARK: - Shared
 
     /// Hit `GET /healthz`; succeeds on any 2xx response.
-    func healthz() async throws {
+    public func healthz() async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent("healthz"))
         request.httpMethod = "GET"
         request.timeoutInterval = 10
@@ -95,13 +115,13 @@ struct DaemonClient {
     // MARK: - Audio units (AUv3)
 
     /// `POST /auv3-probe` with the encoded details; returns the daemon's summary.
-    func sendAudioUnit(_ details: AudioUnitDetails) async throws -> AudioUnitUploadResult {
+    public func sendAudioUnit(_ details: AudioUnitDetails) async throws -> AudioUnitUploadResult {
         let data = try await postJSON(path: "auv3-probe", body: details.encoded())
         return try JSONDecoder().decode(AudioUnitUploadResult.self, from: data)
     }
 
     /// `POST /auv3-probe/diagnostics` with the full scan report (incl. failures).
-    func sendReport(_ report: ScanReport) async throws -> DiagnosticsResult {
+    public func sendReport(_ report: ScanReport) async throws -> DiagnosticsResult {
         let data = try await postJSON(path: "auv3-probe/diagnostics", body: report.encoded())
         return try JSONDecoder().decode(DiagnosticsResult.self, from: data)
     }
@@ -113,7 +133,7 @@ struct DaemonClient {
     /// staging id from the `name` query. The optional `modified` date is sent so
     /// the receiver can preserve the file's original timestamp (keeping device and
     /// controller rows showing the same date). Returns the decoded summary.
-    func uploadAUMSession(data: Data, filename: String, modified: Date? = nil) async throws -> AUMSessionSummary {
+    public func uploadAUMSession(data: Data, filename: String, modified: Date? = nil) async throws -> AUMSessionSummary {
         var components = URLComponents(
             url: baseURL.appendingPathComponent("aum-session"),
             resolvingAgainstBaseURL: false
@@ -135,7 +155,7 @@ struct DaemonClient {
 
     /// `GET /aum-session` — the manifest of files mcp-midi-controller can return,
     /// mapped to the app's UI entries.
-    func listAUMSessions() async throws -> [AUMSessionEntry] {
+    public func listAUMSessions() async throws -> [AUMSessionEntry] {
         var request = URLRequest(url: baseURL.appendingPathComponent("aum-session"))
         request.httpMethod = "GET"
         request.timeoutInterval = 30
@@ -147,7 +167,7 @@ struct DaemonClient {
     /// `GET /aum-session/{file}` — the verbatim file bytes plus the filename the
     /// receiver advertises via `Content-Disposition` (falling back to `file`).
     /// The returned bytes are written into AUM unchanged.
-    func downloadAUMSession(filename: String) async throws -> (data: Data, filename: String) {
+    public func downloadAUMSession(filename: String) async throws -> (data: Data, filename: String) {
         let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(filename)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -164,7 +184,7 @@ struct DaemonClient {
 
     /// `DELETE /aum-session/{file}` — remove one staged file from
     /// mcp-midi-controller (controller-side only; never touches the iPad).
-    func deleteAUMSession(filename: String) async throws {
+    public func deleteAUMSession(filename: String) async throws {
         let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(filename)
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
@@ -173,7 +193,7 @@ struct DaemonClient {
     }
 
     /// `DELETE /aum-session` — clear every staged file from mcp-midi-controller.
-    func deleteAllAUMSessions() async throws {
+    public func deleteAllAUMSessions() async throws {
         var request = URLRequest(url: baseURL.appendingPathComponent("aum-session"))
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
@@ -224,10 +244,10 @@ struct DaemonClient {
 /// The daemon's JSON reply to a successful `POST /auv3-probe`.
 /// (`DiagnosticsResult`, the reply to the diagnostics POST, lives in
 /// AudioUnitDetails.swift alongside the scan-report types it summarizes.)
-struct AudioUnitUploadResult: Decodable {
-    let id: String
-    let name: String
-    let params: Int
-    let writable: Int
-    let staged: String
+public struct AudioUnitUploadResult: Decodable {
+    public let id: String
+    public let name: String
+    public let params: Int
+    public let writable: Int
+    public let staged: String
 }
