@@ -24,7 +24,9 @@ final class TapDSP: @unchecked Sendable {
     let ring = RealtimeRing(capacity: ringCapacity)
 
     /// Keep only every `decimation`-th mono sample (integer downsample). 1 = off.
-    var decimation: Int = 4
+    /// Atomic because it is set live from the UI stepper / streamer queue while
+    /// the render thread reads it; the render snapshots it once per call.
+    let decimation = ManagedAtomic<Int>(4)
 
     /// Whether the tap is actively capturing (set by the UI / config).
     let capturing = ManagedAtomic<Bool>(false)
@@ -84,13 +86,15 @@ final class TapDSP: @unchecked Sendable {
         guard abl.count > 0 else { return }
 
         let channels = abl.count
+        // Snapshot the decimation factor once per render call (it can change live).
+        let dec = Swift.max(1, decimation.load(ordering: .relaxed))
         // Treat each buffer as one channel of deinterleaved Float (the standard
         // AUv3 stream format). Guard against unexpected interleaving.
         var monoCount = 0
         var peak: Float = 0
         var sumSquares: Float = 0
 
-        let frames = Swift.min(frameCount, scratch.count * decimation + decimation)
+        let frames = Swift.min(frameCount, scratch.count * dec + dec)
         var phase = decimationPhase
         for frame in 0..<frameCount where frame < frames {
             var mix: Float = 0
@@ -113,7 +117,7 @@ final class TapDSP: @unchecked Sendable {
                 }
             }
             phase += 1
-            if phase >= max(1, decimation) { phase = 0 }
+            if phase >= dec { phase = 0 }
         }
         decimationPhase = phase
 

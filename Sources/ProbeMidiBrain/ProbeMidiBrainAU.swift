@@ -17,6 +17,7 @@ import ProbeKit
 @objc(ProbeMidiBrainAU)
 public final class ProbeMidiBrainAU: AUAudioUnit {
     private let engine = BrainEngine()
+    private var inputBusArray: AUAudioUnitBusArray!
     private var outputBusArray: AUAudioUnitBusArray!
 
     /// The authored program. Setting it republishes to the realtime engine.
@@ -35,20 +36,17 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
         let outputBus = try AUAudioUnitBus(format: format)
         outputBusArray = AUAudioUnitBusArray(audioUnit: self, busType: .output, busses: [outputBus])
+        // No audio input — an empty array advertises "MIDI only". Created once and
+        // stored (don't rebuild the bus array on every getter call).
+        inputBusArray = AUAudioUnitBusArray(audioUnit: self, busType: .input, busses: [])
 
         engine.setProgram(program)
     }
 
     // MARK: - Busses
 
-    public override var inputBusses: AUAudioUnitBusArray {
-        // No audio input — an empty array advertises "MIDI only".
-        AUAudioUnitBusArray(audioUnit: self, busType: .input, busses: [])
-    }
-
-    public override var outputBusses: AUAudioUnitBusArray {
-        outputBusArray
-    }
+    public override var inputBusses: AUAudioUnitBusArray { inputBusArray }
+    public override var outputBusses: AUAudioUnitBusArray { outputBusArray }
 
     // MARK: - MIDI out
 

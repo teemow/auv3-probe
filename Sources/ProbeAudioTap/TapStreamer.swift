@@ -25,6 +25,11 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
     private var timer: DispatchSourceTimer?
     private var drain: UnsafeMutableBufferPointer<Float>
     private var ticksSinceFeature = 0
+    // Backpressure: bound the number of audio sends queued in URLSession. If the
+    // socket falls behind we drop audio (consistent with the realtime ring's
+    // drop-on-overflow policy) rather than letting the queue grow without bound.
+    private var inFlight = 0
+    private static let maxInFlight = 32
 
     /// Observable status for the UI.
     let connected = ManagedAtomic<Bool>(false)
@@ -43,7 +48,7 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
     }
 
     /// Decimated (streamed) sample rate.
-    private var streamRate: Double { sampleRate / Double(max(1, dsp.decimation)) }
+    private var streamRate: Double { sampleRate / Double(max(1, dsp.decimation.load(ordering: .relaxed))) }
 
     func start(host: String) {
         queue.async { [self] in
@@ -76,6 +81,8 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
         task = nil
         session?.invalidateAndCancel()
         session = nil
+        inFlight = 0
+        ticksSinceFeature = 0
         connected.store(false, ordering: .relaxed)
     }
 
@@ -104,14 +111,21 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
     private func tick() {
         guard let task = task else { return }
 
-        // Drain whatever the render thread has produced and ship it.
+        // Drain whatever the render thread has produced and ship it, unless we
+        // have too many sends in flight (socket fell behind) — then drop.
         var produced = dsp.ring.read(into: drain)
         while produced > 0 {
+            if inFlight >= Self.maxInFlight { break }
             let bytes = produced * MemoryLayout<Float>.size
             let data = drain.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: bytes) {
                 Data(bytes: $0, count: bytes)
             }
-            task.send(.data(data)) { _ in }
+            inFlight += 1
+            task.send(.data(data)) { [weak self] _ in
+                // Completion may run on an arbitrary queue; hop back to our serial
+                // queue to mutate inFlight safely.
+                self?.queue.async { if let self = self { self.inFlight -= 1 } }
+            }
             if produced < drain.count { break }
             produced = dsp.ring.read(into: drain)
         }

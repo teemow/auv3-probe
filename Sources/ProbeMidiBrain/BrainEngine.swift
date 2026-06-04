@@ -92,13 +92,20 @@ final class BrainEngine: @unchecked Sendable {
 
     // MARK: - Render
 
+    /// Non-Sendable render-block pointers, wrapped so the `@Sendable`
+    /// `withLockIfAvailable` closure can carry them without a warning. Only ever
+    /// used synchronously on the realtime thread inside the try-lock.
+    private struct RenderInputs: @unchecked Sendable {
+        let events: UnsafePointer<AURenderEvent>?
+        let sampleTime: Double
+    }
+
     func makeRenderBlock() -> AUInternalRenderBlock {
         return { [self]
             actionFlags, timestamp, frameCount, outputBusNumber, outputData, eventListHead, pullInputBlock in
             _ = actionFlags
             _ = frameCount
             _ = outputBusNumber
-            _ = outputData
             _ = pullInputBlock
 
             // A MIDI processor produces no audio; clear any output buffers the
@@ -110,28 +117,24 @@ final class BrainEngine: @unchecked Sendable {
                 }
             }
 
-            // Snapshot the program out of the realtime lock with a non-blocking
-            // try-lock. The snapshot only copies array *references* (a retain, no
-            // element allocation); if the UI thread holds the lock we skip this
-            // cycle — harmless for MIDI, never blocks audio. Processing then runs
-            // outside the (@Sendable) lock closure so the event-list/timestamp
-            // pointers are not captured across the Sendable boundary.
-            guard let prog = self.program.withLockIfAvailable({ $0 }) else {
-                return noErr
-            }
-
-            // 1) Footswitch input: walk the realtime event list.
-            var event = eventListHead
-            while let raw = event {
-                let head = raw.pointee.head
-                if head.eventType == .MIDI {
-                    self.handleMIDI(raw.pointee.MIDI, program: prog, at: timestamp.pointee.mSampleTime)
+            // Evaluate under a non-blocking try-lock. If the UI thread is mid-edit
+            // we skip this cycle (harmless for MIDI, never blocks audio). All work
+            // happens *inside* the closure so the program is never copied out (no
+            // array retains on the audio thread); the arrays are read by index.
+            let inputs = RenderInputs(events: eventListHead, sampleTime: timestamp.pointee.mSampleTime)
+            self.program.withLockIfAvailable { prog in
+                // 1) Footswitch input: walk the realtime event list.
+                var event = inputs.events
+                while let raw = event {
+                    let head = raw.pointee.head
+                    if head.eventType == .MIDI {
+                        self.handleMIDI(raw.pointee.MIDI, program: &prog, at: inputs.sampleTime)
+                    }
+                    event = UnsafePointer(head.next)
                 }
-                event = UnsafePointer(head.next)
+                // 2) Transport-driven section boundaries.
+                self.evaluateTransport(program: &prog, at: inputs.sampleTime)
             }
-
-            // 2) Transport-driven section boundaries.
-            self.evaluateTransport(program: prog, at: timestamp.pointee.mSampleTime)
 
             return noErr
         }
@@ -139,7 +142,7 @@ final class BrainEngine: @unchecked Sendable {
 
     // MARK: - MIDI in (footswitch)
 
-    private func handleMIDI(_ midi: AUMIDIEvent, program prog: RenderProgram, at sampleTime: Double) {
+    private func handleMIDI(_ midi: AUMIDIEvent, program prog: inout RenderProgram, at sampleTime: Double) {
         // AUMIDIEvent.data is a fixed 3-byte tuple; read only `length` bytes.
         let length = Int(midi.length)
         guard length >= 1 else { return }
@@ -149,8 +152,15 @@ final class BrainEngine: @unchecked Sendable {
         }
         guard let message = message else { return }
 
-        for mapping in prog.footswitches where matches(mapping, message) {
-            applyFootswitch(mapping.action, program: prog, at: sampleTime)
+        // Iterate by index so the footswitch array's buffer is read in place and
+        // never retained on the audio thread (FootswitchMapping is a value type).
+        var i = 0
+        while i < prog.footswitches.count {
+            let mapping = prog.footswitches[i]
+            if matches(mapping, message) {
+                applyFootswitch(mapping.action, program: &prog, at: sampleTime)
+            }
+            i += 1
         }
     }
 
@@ -168,7 +178,7 @@ final class BrainEngine: @unchecked Sendable {
         }
     }
 
-    private func applyFootswitch(_ action: SceneAction, program prog: RenderProgram, at sampleTime: Double) {
+    private func applyFootswitch(_ action: SceneAction, program prog: inout RenderProgram, at sampleTime: Double) {
         let target: Int
         switch action {
         case .scene(let s):
@@ -186,12 +196,12 @@ final class BrainEngine: @unchecked Sendable {
             target = prog.sectionScenes[prev]
             statusSection.store(prev, ordering: .relaxed)
         }
-        emitScene(target, program: prog, at: sampleTime)
+        emitScene(target, program: &prog, at: sampleTime)
     }
 
     // MARK: - Transport
 
-    private func evaluateTransport(program prog: RenderProgram, at sampleTime: Double) {
+    private func evaluateTransport(program prog: inout RenderProgram, at sampleTime: Double) {
         guard let transportState = transportState else { return }
         var flags = AUHostTransportStateFlags(rawValue: 0)
         let haveTransport = transportState(&flags, nil, nil, nil)
@@ -210,12 +220,12 @@ final class BrainEngine: @unchecked Sendable {
         }
         lastSectionIndex = index
         statusSection.store(index, ordering: .relaxed)
-        emitScene(prog.sectionScenes[index], program: prog, at: sampleTime)
+        emitScene(prog.sectionScenes[index], program: &prog, at: sampleTime)
     }
 
     // MARK: - Emit
 
-    private func emitScene(_ scene: Int, program prog: RenderProgram, at sampleTime: Double) {
+    private func emitScene(_ scene: Int, program prog: inout RenderProgram, at sampleTime: Double) {
         guard scene != lastEmittedScene, let midiOut = midiOut else {
             lastEmittedScene = scene
             return
