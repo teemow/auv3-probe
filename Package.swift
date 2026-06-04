@@ -30,7 +30,7 @@ let package = Package(
         // correct atomics on the iOS 16 floor (the stdlib `Synchronization`
         // module is iOS 18+). swift-atomics is Apple-maintained and works on
         // both build paths (SwiftPM/xtool here, XcodeGen via project.yml packages).
-        .package(url: "https://github.com/apple/swift-atomics.git", from: "1.2.0"),
+        .package(url: "https://github.com/apple/swift-atomics.git", from: "1.3.0"),
     ],
     targets: [
         .target(
