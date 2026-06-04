@@ -2,14 +2,15 @@ import Foundation
 import AVFoundation
 import AudioToolbox
 
-// AudioUnitProber enumerates the AUv3 components installed on the device and,
-// for a chosen one, walks its AUParameterTree into a ProbeDump. Enumeration is
-// instance-independent (any instance of a plugin has the same tree as the one
-// AUM hosts), so no audio engine is needed — we instantiate, read the tree, and
-// throw the instance away. See docs/research/auv3-feedback.md in the main repo.
+// AudioUnitScanner enumerates the AUv3 audio units installed on the device and,
+// for a chosen one, reads its AUParameterTree + metadata into an
+// AudioUnitDetails. Reading is instance-independent (any instance of an audio
+// unit has the same tree as the one AUM hosts), so no audio engine is needed —
+// we instantiate, read, and throw the instance away. See
+// docs/research/auv3-feedback.md in the main repo.
 
-/// A plugin discovered by `AVAudioUnitComponentManager`. `Identifiable` so it
-/// drops straight into a SwiftUI `List` with multi-select.
+/// An audio unit discovered by `AVAudioUnitComponentManager`. `Identifiable` so
+/// it drops straight into a SwiftUI `List` with multi-select.
 struct DiscoveredAudioUnit: Identifiable, Hashable {
     let id: String
     let name: String
@@ -38,12 +39,12 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
             + "/\(FourCharCode.string(from: desc.componentManufacturer))"
     }
 
-    /// The stable id the receiver uses to name staged dumps. Mirrors
-    /// `ProbeDump.probeID` so a failed probe (which produces no dump) reports the
-    /// same id as a successful one would.
-    var probeID: String {
+    /// The stable id the daemon uses to name staged files. Mirrors
+    /// `AudioUnitDetails.fileID` so a failed read (which produces no details)
+    /// reports the same id as a successful one would.
+    var fileID: String {
         let subtype = FourCharCode.string(from: componentDescription.componentSubType)
-        return ProbeDump.sanitizeID(subtype.isEmpty ? name : subtype)
+        return AudioUnitDetails.sanitizeID(subtype.isEmpty ? name : subtype)
     }
 
     // AudioComponentDescription is not Hashable/Equatable, so key both off the
@@ -57,7 +58,7 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
     }
 }
 
-enum ProbeError: LocalizedError {
+enum AudioUnitError: LocalizedError {
     case instantiationFailed(String)
 
     var errorDescription: String? {
@@ -68,42 +69,42 @@ enum ProbeError: LocalizedError {
     }
 }
 
-enum AudioUnitProber {
-    /// The component types we care about: instruments (`aumu`), effects
-    /// (`aufx`) and music effects (`aumf`).
-    static let probedTypes: [OSType] = [
+enum AudioUnitScanner {
+    /// The component types we read: instruments (`aumu`), effects (`aufx`) and
+    /// music effects (`aumf`).
+    static let scannedTypes: [OSType] = [
         kAudioUnitType_MusicDevice,   // aumu
         kAudioUnitType_Effect,        // aufx
         kAudioUnitType_MusicEffect,   // aumf
     ]
 
-    /// Enumerate installed AUv3s of the probed types, sorted by name.
+    /// Enumerate installed AUv3s of the scanned types, sorted by name.
     static func discover() -> [DiscoveredAudioUnit] {
         let manager = AVAudioUnitComponentManager.shared()
-        let probed = Set(probedTypes)
+        let wanted = Set(scannedTypes)
         let components = manager.components { component, _ in
-            probed.contains(component.audioComponentDescription.componentType)
+            wanted.contains(component.audioComponentDescription.componentType)
         }
         return components
             .map(DiscoveredAudioUnit.init)
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Instantiate `unit`, read its parameter tree + metadata, and return a
-    /// ProbeDump. A unit with no parameter tree returns a dump with zero
-    /// parameters (it is valid diagnostic data, not an error) rather than
-    /// throwing — only a failed instantiation throws.
-    static func probe(_ unit: DiscoveredAudioUnit) async throws -> ProbeDump {
+    /// Instantiate `unit`, read its parameter tree + metadata, and return
+    /// AudioUnitDetails. A unit with no parameter tree returns details with zero
+    /// parameters (valid data, not an error) rather than throwing — only a
+    /// failed instantiation throws.
+    static func readDetails(_ unit: DiscoveredAudioUnit) async throws -> AudioUnitDetails {
         let avUnit = try await instantiate(unit.componentDescription)
         let auUnit = avUnit.auAudioUnit
 
-        var parameters: [ProbeParam] = []
+        var parameters: [ParameterInfo] = []
         if let tree = auUnit.parameterTree {
             parameters = flatten(tree)
         }
 
         let desc = unit.componentDescription
-        let component = ProbeComponent(
+        let component = AudioUnitComponent(
             type: FourCharCode.string(from: desc.componentType),
             subtype: FourCharCode.string(from: desc.componentSubType),
             manufacturer: FourCharCode.string(from: desc.componentManufacturer),
@@ -114,13 +115,10 @@ enum AudioUnitProber {
         )
 
         let presets = (auUnit.factoryPresets ?? []).map {
-            ProbePreset(number: $0.number, name: $0.name)
+            PresetInfo(number: $0.number, name: $0.name)
         }
-        // User presets are only meaningful when the unit supports them; reading
-        // the array is safe regardless, but gate to avoid surprises on units
-        // that don't.
         let userPresets = auUnit.supportsUserPresets
-            ? auUnit.userPresets.map { ProbePreset(number: $0.number, name: $0.name) }
+            ? auUnit.userPresets.map { PresetInfo(number: $0.number, name: $0.name) }
             : []
         let shortName = auUnit.audioUnitShortName
 
@@ -128,7 +126,7 @@ enum AudioUnitProber {
         let latency = auUnit.latency
         let tailTime = auUnit.tailTime
 
-        return ProbeDump(
+        return AudioUnitDetails(
             component: component,
             name: unit.name,
             parameters: parameters,
@@ -142,41 +140,37 @@ enum AudioUnitProber {
         )
     }
 
-    /// Number of non-finite values that were sanitized in a dump (for the run
+    /// Number of non-finite values that were sanitized in a record (for the scan
     /// report). Counted here so the model does not re-walk the tree.
-    static func sanitizedCount(_ dump: ProbeDump) -> Int {
-        dump.parameters.reduce(0) { $0 + ($1.nonFinite != nil ? 1 : 0) }
+    static func sanitizedCount(_ details: AudioUnitDetails) -> Int {
+        details.parameters.reduce(0) { $0 + ($1.nonFinite != nil ? 1 : 0) }
     }
 
     // MARK: - Tree walking
 
-    /// Walk the parameter tree depth-first, preserving order and recording each
-    /// parameter's parent group displayName, then return a flat [ProbeParam].
-    private static func flatten(_ tree: AUParameterTree) -> [ProbeParam] {
-        var out: [ProbeParam] = []
+    private static func flatten(_ tree: AUParameterTree) -> [ParameterInfo] {
+        var out: [ParameterInfo] = []
         walk(nodes: tree.children, group: nil, into: &out)
-        // Fallback: a tree that exposes parameters only via allParameters and
-        // not as children still gets dumped.
         if out.isEmpty {
-            out = tree.allParameters.map { makeParam($0, group: nil) }
+            out = tree.allParameters.map { makeParameter($0, group: nil) }
         }
         return out
     }
 
-    private static func walk(nodes: [AUParameterNode], group: String?, into out: inout [ProbeParam]) {
+    private static func walk(nodes: [AUParameterNode], group: String?, into out: inout [ParameterInfo]) {
         for node in nodes {
             if let g = node as? AUParameterGroup {
                 let name = g.displayName.isEmpty ? g.identifier : g.displayName
                 walk(nodes: g.children, group: name, into: &out)
             } else if let p = node as? AUParameter {
-                out.append(makeParam(p, group: group))
+                out.append(makeParameter(p, group: group))
             }
         }
     }
 
     // MARK: - Mapping
 
-    private static func makeParam(_ p: AUParameter, group: String?) -> ProbeParam {
+    private static func makeParameter(_ p: AUParameter, group: String?) -> ParameterInfo {
         let flags = p.flags
         let unitName = (p.unitName?.isEmpty == false) ? p.unitName : nil
         let valueStrings = p.valueStrings?.isEmpty == false ? p.valueStrings : nil
@@ -193,7 +187,7 @@ enum AudioUnitProber {
 
         let dependents = (p.dependentParameters ?? []).map { UInt64(truncating: $0) }
 
-        return ProbeParam(
+        return ParameterInfo(
             address: UInt64(p.address),
             keyPath: p.keyPath,
             identifier: p.identifier,
@@ -233,18 +227,18 @@ enum AudioUnitProber {
         try await withCheckedThrowingContinuation { continuation in
             AVAudioUnit.instantiate(with: desc, options: []) { avUnit, error in
                 if let error = error {
-                    continuation.resume(throwing: ProbeError.instantiationFailed(error.localizedDescription))
+                    continuation.resume(throwing: AudioUnitError.instantiationFailed(error.localizedDescription))
                 } else if let avUnit = avUnit {
                     continuation.resume(returning: avUnit)
                 } else {
-                    continuation.resume(throwing: ProbeError.instantiationFailed("no unit and no error"))
+                    continuation.resume(throwing: AudioUnitError.instantiationFailed("no unit and no error"))
                 }
             }
         }
     }
 
     /// Render an `AudioUnitParameterUnit` to a stable lowercase token, matching
-    /// the human-readable units recorded in the dump (e.g. "generic", "hertz").
+    /// the human-readable units recorded in the details (e.g. "generic", "hertz").
     private static func unitString(_ unit: AudioUnitParameterUnit) -> String {
         switch unit {
         case .generic: return "generic"

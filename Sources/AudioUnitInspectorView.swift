@@ -1,27 +1,24 @@
 import SwiftUI
 
-// ProbeInspectorView renders a single ProbeDump — the exact bytes a batch send
-// would POST — in the signalwave design language (see docs/signalwave.md). It is
-// a read-only "no obfuscation" view: header identity, an at-a-glance summary of
-// what gets sent, a privacy note for installation-private user presets, the full
-// group-sectioned parameter list, presets, and the literal raw JSON.
+// AudioUnitInspectorView renders one audio unit's details (AudioUnitDetails) —
+// the exact bytes a batch send would POST — in the signalwave design language
+// (see docs/signalwave.md). It is a read-only "no obfuscation" view: header
+// identity, an at-a-glance summary of what gets sent, a privacy note for
+// installation-private user presets, the full group-sectioned parameter list,
+// presets, and the literal raw JSON.
 //
-// Real dumps span 0 params to thousands (one file is ~1.8 MB with very long
+// Real records span 0 params to thousands (one is ~1.8 MB with very long
 // valueStrings), so the parameter list renders lazily, big valueStrings stay
-// collapsed behind a count, and the raw JSON is only encoded when its disclosure
-// is opened.
+// collapsed behind a count, and the raw JSON is only encoded when revealed.
 
-struct ProbeInspectorView: View {
-    let dump: ProbeDump
+struct AudioUnitInspectorView: View {
+    let details: AudioUnitDetails
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var focus: Focus = .all
 
-    /// Optional "isolate" lens set by tapping a chip in the summary: show only one
-    /// parameter group, or only the factory/user preset list. `.all` shows
-    /// everything. Independent of the free-text `query`, which still applies
-    /// within a focused group.
+    /// Optional "isolate" lens set by tapping a chip in the summary.
     enum Focus: Equatable {
         case all
         case group(String)
@@ -58,7 +55,7 @@ struct ProbeInspectorView: View {
                         privacyNote
                         if showsParameters { parameters }
                         if showsPresets { presets }
-                        RawJSONSection(dump: dump)
+                        RawJSONSection(details: details)
                     }
                     .padding(16)
                     .padding(.bottom, 24)
@@ -83,7 +80,7 @@ struct ProbeInspectorView: View {
                 Text("inspect")
                     .font(Signalwave.mono(.subheadline, weight: .bold))
                     .foregroundStyle(Signalwave.fg)
-                Text("local probe · not sent")
+                Text("read locally · not sent")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
             }
@@ -103,19 +100,19 @@ struct ProbeInspectorView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(dump.name)
+            Text(details.name)
                 .font(Signalwave.mono(.title3, weight: .bold))
                 .foregroundStyle(Signalwave.fg)
                 .textSelection(.enabled)
 
-            if let short = dump.shortName, !short.isEmpty, short != dump.name {
+            if let short = details.shortName, !short.isEmpty, short != details.name {
                 Text(short)
                     .font(Signalwave.mono(.caption))
                     .foregroundStyle(Signalwave.dim)
                     .textSelection(.enabled)
             }
 
-            let c = dump.component
+            let c = details.component
             let extras = [c.typeName, c.manufacturerName, c.version.map { "v\($0)" }]
                 .compactMap { $0 }
                 .filter { !$0.isEmpty }
@@ -126,7 +123,7 @@ struct ProbeInspectorView: View {
                     .textSelection(.enabled)
             }
 
-            if let tags = dump.component.tags, !tags.isEmpty {
+            if let tags = details.component.tags, !tags.isEmpty {
                 FlowChips(chips: tags)
                     .padding(.top, 2)
             }
@@ -137,19 +134,15 @@ struct ProbeInspectorView: View {
     // MARK: - Summary (what gets sent, at a glance)
 
     private var summary: some View {
-        let params = dump.parameters
+        let params = details.parameters
         let writable = params.lazy.filter(\.writable).count
         let nonFinite = params.lazy.filter { $0.nonFinite != nil }.count
-        let factory = dump.factoryPresets?.count ?? 0
-        let user = dump.userPresets?.count ?? 0
+        let factory = details.factoryPresets?.count ?? 0
+        let user = details.userPresets?.count ?? 0
 
         return VStack(alignment: .leading, spacing: 10) {
             SectionHeader("summary")
 
-            // One element: compact wrapped stats on top, then the group + preset
-            // chips. Each chip toggles an isolation lens — the highlighted chip is
-            // the active filter, so no separate banner/"show all" is needed. Tap
-            // again to clear.
             VStack(alignment: .leading, spacing: 10) {
                 WrapLayout(spacing: 10, lineSpacing: 4) {
                     statToken("params", "\(params.count)")
@@ -157,16 +150,16 @@ struct ProbeInspectorView: View {
                     if nonFinite > 0 {
                         statToken("non-finite", "\(nonFinite)", color: Signalwave.amber)
                     }
-                    if let caps = dump.channelCapabilities, !caps.isEmpty {
+                    if let caps = details.channelCapabilities, !caps.isEmpty {
                         statToken("caps", formatChannelCaps(caps))
                     }
-                    if let latency = dump.latency, latency != 0 {
+                    if let latency = details.latency, latency != 0 {
                         statToken("latency", "\(formatNumber(latency))s")
                     }
-                    if let tail = dump.tailTime, tail != 0 {
+                    if let tail = details.tailTime, tail != 0 {
                         statToken("tail", "\(formatNumber(tail))s")
                     }
-                    if let supports = dump.supportsUserPresets {
+                    if let supports = details.supportsUserPresets {
                         statToken("user presets", supports ? "yes" : "no")
                     }
                 }
@@ -203,21 +196,16 @@ struct ProbeInspectorView: View {
         }
     }
 
-    /// True when there is at least one tappable isolation chip (>1 group, or any
-    /// presets) — i.e. the chip row is worth rendering.
     private var hasFilterChips: Bool {
         groupChips.count > 1
-            || dump.factoryPresets?.isEmpty == false
-            || dump.userPresets?.isEmpty == false
+            || details.factoryPresets?.isEmpty == false
+            || details.userPresets?.isEmpty == false
     }
 
-    /// (group name, count) for every group, in first-appearance order. Computed
-    /// once from the full (unfiltered) parameter list.
     private var groupChips: [(name: String, count: Int)] {
-        grouped(dump.parameters).map { ($0.name, $0.params.count) }
+        grouped(details.parameters).map { ($0.name, $0.params.count) }
     }
 
-    /// A compact non-interactive stat (`label value`) for the wrapped stats line.
     private func statToken(_ label: String, _ value: String, color: Color = Signalwave.fg) -> some View {
         HStack(spacing: 4) {
             Text(label)
@@ -229,7 +217,6 @@ struct ProbeInspectorView: View {
         .font(Signalwave.mono(.caption2, weight: .semibold))
     }
 
-    /// A tappable isolation chip; filled in its accent when active.
     private func filterChip(_ title: String, accent: Color, isActive: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
@@ -253,7 +240,7 @@ struct ProbeInspectorView: View {
 
     private var privacyNote: some View {
         Label {
-            Text("user-preset names are installation-specific. they only leave this device when you send to your own lan receiver — never committed to git.")
+            Text("user-preset names are installation-specific. they only leave this device when you send to your own mcp-midi-controller on the lan — never committed to git.")
         } icon: {
             Image(systemName: "lock.shield")
         }
@@ -266,13 +253,12 @@ struct ProbeInspectorView: View {
 
     private static let ungroupedKey = "ungrouped"
 
-    private func groupKey(_ p: ProbeParam) -> String {
+    private func groupKey(_ p: ParameterInfo) -> String {
         (p.group?.isEmpty == false) ? p.group! : Self.ungroupedKey
     }
 
-    private var filteredParameters: [ProbeParam] {
-        var params = dump.parameters
-        // Group focus (set from a summary chip) narrows before the text filter.
+    private var filteredParameters: [ParameterInfo] {
+        var params = details.parameters
         if case .group(let g) = focus {
             params = params.filter { groupKey($0) == g }
         }
@@ -287,18 +273,14 @@ struct ProbeInspectorView: View {
         }
     }
 
-    /// Groups `params` by `group`, preserving first-appearance order; params
-    /// with no group fall under a single "ungrouped" bucket appended last.
-    private func grouped(_ params: [ProbeParam]) -> [(name: String, params: [ProbeParam])] {
+    private func grouped(_ params: [ParameterInfo]) -> [(name: String, params: [ParameterInfo])] {
         var order: [String] = []
-        var buckets: [String: [ProbeParam]] = [:]
+        var buckets: [String: [ParameterInfo]] = [:]
         for p in params {
             let key = groupKey(p)
             if buckets[key] == nil { order.append(key) }
             buckets[key, default: []].append(p)
         }
-        // Keep the catch-all bucket last while preserving first-appearance order
-        // for real groups (Array.sort is not guaranteed stable, so move by hand).
         if let idx = order.firstIndex(of: Self.ungroupedKey), idx != order.count - 1 {
             order.remove(at: idx)
             order.append(Self.ungroupedKey)
@@ -308,15 +290,12 @@ struct ProbeInspectorView: View {
 
     @ViewBuilder
     private var parameters: some View {
-        // Filter + group once per render: the worst-case dump has thousands of
-        // params, so the result is reused by both the content and the header
-        // count rather than recomputed for each.
         let filtered = filteredParameters
         let groups = grouped(filtered)
 
         Section {
-            if dump.parameters.isEmpty {
-                Text("// no parameters exposed by this plugin")
+            if details.parameters.isEmpty {
+                Text("// no parameters exposed by this audio unit")
                     .font(Signalwave.mono(.caption))
                     .foregroundStyle(Signalwave.dim)
                     .padding(.top, 4)
@@ -338,7 +317,7 @@ struct ProbeInspectorView: View {
             HStack(spacing: 8) {
                 SectionHeader("parameters")
                 Spacer()
-                Text("\(filtered.count)/\(dump.parameters.count)")
+                Text("\(filtered.count)/\(details.parameters.count)")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
             }
@@ -372,7 +351,7 @@ struct ProbeInspectorView: View {
     }
 
     @ViewBuilder
-    private func paramGroup(_ name: String, params: [ProbeParam]) -> some View {
+    private func paramGroup(_ name: String, params: [ParameterInfo]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text(name)
@@ -392,7 +371,7 @@ struct ProbeInspectorView: View {
                             .fill(Signalwave.grid)
                             .frame(height: 1)
                     }
-                    ParamRowView(param: param, formatNumber: formatNumber)
+                    ParameterRowView(param: param, formatNumber: formatNumber)
                 }
             }
             .overlay(
@@ -406,9 +385,8 @@ struct ProbeInspectorView: View {
 
     @ViewBuilder
     private var presets: some View {
-        let factory = dump.factoryPresets ?? []
-        let user = dump.userPresets ?? []
-        // Respect a preset focus set from the summary: show only that list.
+        let factory = details.factoryPresets ?? []
+        let user = details.userPresets ?? []
         let showFactory = !factory.isEmpty && focus != .userPresets
         let showUser = !user.isEmpty && focus != .factoryPresets
         if showFactory || showUser {
@@ -424,7 +402,7 @@ struct ProbeInspectorView: View {
         }
     }
 
-    private func presetList(_ label: String, presets: [ProbePreset], accent: Color) -> some View {
+    private func presetList(_ label: String, presets: [PresetInfo], accent: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("// \(label)")
                 .font(Signalwave.mono(.caption2, weight: .semibold))
@@ -458,8 +436,6 @@ struct ProbeInspectorView: View {
 
     // MARK: - Formatting helpers
 
-    /// Renders a Double tersely: integral values lose their ".0", others keep up
-    /// to 6 significant-ish digits with trailing zeros trimmed.
     private func formatNumber(_ value: Double) -> String {
         if value == value.rounded() && abs(value) < 1e15 {
             return String(Int64(value))
@@ -473,7 +449,6 @@ struct ProbeInspectorView: View {
     }
 
     private func formatChannelCaps(_ caps: [Int]) -> String {
-        // Flattened [in, out] pairs; -1 means "any".
         func token(_ v: Int) -> String { v == -1 ? "any" : "\(v)" }
         var pairs: [String] = []
         var i = 0
@@ -489,11 +464,10 @@ struct ProbeInspectorView: View {
 // MARK: - Raw JSON
 
 /// The collapsible "raw json" section, isolated into its own view so toggling it
-/// open/closed only re-renders this subtree — not the parent's filtered/grouped
-/// parameter list (which is O(params) and costly on the ~1.8 MB worst case). The
-/// dump is encoded only when revealed.
+/// open/closed only re-renders this subtree. The details are encoded only on
+/// reveal.
 private struct RawJSONSection: View {
-    let dump: ProbeDump
+    let details: AudioUnitDetails
 
     @State private var showRaw = false
 
@@ -533,8 +507,8 @@ private struct RawJSONSection: View {
     }
 
     private var rawJSONString: String {
-        guard let data = try? dump.encoded() else {
-            return "// failed to encode dump"
+        guard let data = try? details.encoded() else {
+            return "// failed to encode details"
         }
         return String(decoding: data, as: UTF8.self)
     }
@@ -543,10 +517,9 @@ private struct RawJSONSection: View {
 // MARK: - Parameter row
 
 /// One parameter, rendered as a compact capture-style entry. Long valueStrings
-/// stay collapsed behind a count (`indexed · N values`) and only render when
-/// tapped, so a plugin with thousands of long strings does not blow up the list.
-private struct ParamRowView: View {
-    let param: ProbeParam
+/// stay collapsed behind a count and only render when tapped.
+private struct ParameterRowView: View {
+    let param: ParameterInfo
     let formatNumber: (Double) -> String
 
     @State private var showValueStrings = false
@@ -589,7 +562,7 @@ private struct ParamRowView: View {
             }
 
             if let nf = param.nonFinite {
-                chip("non-finite · \(nf)", color: Signalwave.amber)
+                SignalChip(text: "non-finite · \(nf)", color: Signalwave.amber)
             }
 
             valueStringsView
@@ -670,90 +643,5 @@ private struct ParamRowView: View {
             .font(Signalwave.mono(.caption2))
             .foregroundStyle(Signalwave.dim.opacity(0.7))
             .textSelection(.enabled)
-    }
-
-    private func chip(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(Signalwave.mono(.caption2, weight: .semibold))
-            .foregroundStyle(color)
-            .padding(.vertical, 2)
-            .padding(.horizontal, 6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .stroke(color.opacity(0.5), lineWidth: 1)
-            )
-    }
-}
-
-// MARK: - Flow-wrapping chip row
-
-/// A wrapping row of small chips backed by a flexible `WrapLayout` (iOS 16
-/// `Layout`); kept tiny so flag chips wrap cleanly on narrow parameter rows.
-private struct FlowChips: View {
-    let chips: [String]
-
-    var body: some View {
-        WrapLayout(spacing: 6, lineSpacing: 4) {
-            ForEach(chips, id: \.self) { chip in
-                Text(chip)
-                    .font(Signalwave.mono(.caption2, weight: .semibold))
-                    .foregroundStyle(Signalwave.green.opacity(0.9))
-                    .padding(.vertical, 2)
-                    .padding(.horizontal, 6)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .stroke(Signalwave.green.opacity(0.4), lineWidth: 1)
-                    )
-            }
-        }
-    }
-}
-
-/// Minimal flow layout that wraps subviews to the available width.
-private struct WrapLayout: Layout {
-    var spacing: CGFloat = 6
-    var lineSpacing: CGFloat = 4
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var rowWidth: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var totalHeight: CGFloat = 0
-        var totalWidth: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if rowWidth > 0 && rowWidth + spacing + size.width > maxWidth {
-                totalHeight += rowHeight + lineSpacing
-                totalWidth = max(totalWidth, rowWidth)
-                rowWidth = size.width
-                rowHeight = size.height
-            } else {
-                rowWidth += (rowWidth > 0 ? spacing : 0) + size.width
-                rowHeight = max(rowHeight, size.height)
-            }
-        }
-        totalHeight += rowHeight
-        totalWidth = max(totalWidth, rowWidth)
-        return CGSize(width: min(totalWidth, maxWidth), height: totalHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let maxWidth = bounds.width
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > bounds.minX && x - bounds.minX + size.width > maxWidth {
-                x = bounds.minX
-                y += rowHeight + lineSpacing
-                rowHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
     }
 }

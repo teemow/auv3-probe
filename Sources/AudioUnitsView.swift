@@ -1,18 +1,18 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// The single-screen probe UI, rendered in the signalwave design language (see
+// The audio-units tab, rendered in the signalwave design language (see
 // docs/signalwave.md): a charcoal "sniffer console" that lists every installed
-// AUv3 like a packet capture, exposes what each one broadcasts, and probes the
-// armed rows from a fixed action bar.
+// AUv3 like a packet capture, exposes the details (parameters/presets) each one
+// carries, and reads the armed rows from a fixed action bar.
 //
-// Layout is hand-built (not a system Form) so it can adopt the full aesthetic:
-// deep charcoal field, monospaced lowercase chrome, a single cyber-green signal
-// accent, slate hairline dividers, hard edges. UI chrome is lowercased; raw data
-// (plugin names, FourCC codes, counts) is shown verbatim — "no obfuscation".
+// The daemon host lives in the shared Receiver (top bar in RootView), so this
+// view reads it from the environment rather than owning a host field. UI chrome
+// is lowercased; raw data (unit names, FourCC codes, counts) is shown verbatim.
 
-struct ContentView: View {
-    @StateObject private var model = ProbeModel()
+struct AudioUnitsView: View {
+    @EnvironmentObject private var receiver: Receiver
+    @StateObject private var model = AudioUnitsModel()
     @State private var query = ""
 
     private var filteredUnits: [DiscoveredAudioUnit] {
@@ -25,27 +25,21 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack {
-            Signalwave.bg.ignoresSafeArea()
+        VStack(spacing: 0) {
+            header
+            Divider().overlay(Signalwave.grid)
 
-            VStack(spacing: 0) {
-                header
-                Divider().overlay(Signalwave.grid)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 28) {
-                        receiverSection
-                        pluginsSection
-                    }
-                    .padding(16)
-                    .padding(.bottom, 8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    unitsSection
                 }
-
-                actionBar
+                .padding(16)
+                .padding(.bottom, 8)
             }
+
+            actionBar
         }
-        .tint(Signalwave.green)
-        .preferredColorScheme(.dark)
+        .background(Signalwave.bg.ignoresSafeArea())
         .onAppear { if model.units.isEmpty { model.refresh() } }
         .fileExporter(
             isPresented: $model.isExporting,
@@ -54,34 +48,31 @@ struct ContentView: View {
             defaultFilename: model.exportFilename
         ) { _ in }
         .sheet(item: inspectedBinding) { item in
-            ProbeInspectorView(dump: item.dump)
+            AudioUnitInspectorView(details: item.details)
         }
     }
 
-    /// Bridges `model.inspectedID` (a plain id) to a `.sheet(item:)` binding by
-    /// pairing it with its stashed dump; clearing the binding dismisses the
-    /// sheet by nilling `inspectedID`.
-    private var inspectedBinding: Binding<InspectedPlugin?> {
+    /// Bridges `model.inspectedID` to a `.sheet(item:)` binding by pairing it
+    /// with its stashed details; clearing the binding dismisses the sheet.
+    private var inspectedBinding: Binding<InspectedAudioUnit?> {
         Binding(
             get: {
-                guard let id = model.inspectedID, let dump = model.dump(id) else { return nil }
-                return InspectedPlugin(id: id, dump: dump)
+                guard let id = model.inspectedID, let details = model.details(id) else { return nil }
+                return InspectedAudioUnit(id: id, details: details)
             },
             set: { newValue in model.inspectedID = newValue?.id }
         )
     }
 
-    // MARK: - Header / wordmark
+    // MARK: - Header
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
-            WaveGlyph()
-                .frame(width: 40, height: 26)
             VStack(alignment: .leading, spacing: 1) {
-                Text("auv3probe")
+                Text("audio units")
                     .font(Signalwave.mono(.title3, weight: .bold))
                     .foregroundStyle(Signalwave.fg)
-                Text("auv3 parameter-tree sniffer")
+                Text("auv3 · parameters & presets")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
             }
@@ -100,62 +91,12 @@ struct ContentView: View {
         .padding(.vertical, 12)
     }
 
-    // MARK: - Receiver
+    // MARK: - Units
 
-    private var receiverSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader("receiver")
-
-            HStack(spacing: 8) {
-                Text(">")
-                    .font(Signalwave.mono(.body, weight: .bold))
-                    .foregroundStyle(Signalwave.green)
-                TextField("host:7800", text: $model.host)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .font(Signalwave.mono(.body))
-                    .foregroundStyle(Signalwave.fg)
-                    .tint(Signalwave.green)
-            }
-            .signalField()
-
-            HStack(spacing: 12) {
-                Button {
-                    Task { await model.testConnection() }
-                } label: {
-                    Label("test connection", systemImage: "dot.radiowaves.left.and.right")
-                }
-                .buttonStyle(.signalGhost)
-                .disabled(model.isBusy || model.host.trimmingCharacters(in: .whitespaces).isEmpty)
-
-                if model.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(Signalwave.green)
-                }
-                Spacer()
-            }
-
-            if let message = model.connectionMessage {
-                consoleLine(
-                    message,
-                    icon: model.connectionOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
-                    color: model.connectionOK ? Signalwave.green : Signalwave.amber)
-            }
-
-            Text("// receiver on your lan (default :7800). last host is remembered.")
-                .font(Signalwave.mono(.caption2))
-                .foregroundStyle(Signalwave.dim)
-        }
-    }
-
-    // MARK: - Plugins
-
-    private var pluginsSection: some View {
+    private var unitsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                SectionHeader("plugins")
+                SectionHeader("audio units")
                 Spacer()
                 Text("\(model.selected.count)/\(model.units.count)")
                     .font(Signalwave.mono(.footnote))
@@ -193,7 +134,7 @@ struct ContentView: View {
             if model.units.isEmpty {
                 emptyState
             } else if filteredUnits.isEmpty {
-                Text("// no plugins match “\(query)”")
+                Text("// no audio units match “\(query)”")
                     .font(Signalwave.mono(.subheadline))
                     .foregroundStyle(Signalwave.dim)
                     .padding(.vertical, 8)
@@ -205,7 +146,7 @@ struct ContentView: View {
                                 .fill(Signalwave.grid)
                                 .frame(height: 1)
                         }
-                        pluginRow(unit)
+                        unitRow(unit)
                     }
                 }
                 .overlay(
@@ -218,10 +159,10 @@ struct ContentView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("// no auv3 plugins found")
+            Text("// no auv3 audio units found")
                 .font(Signalwave.mono(.subheadline, weight: .semibold))
                 .foregroundStyle(Signalwave.fg)
-            Text("install auv3 instruments/effects, then rescan. third-party plugins need the inter-app audio entitlement.")
+            Text("install auv3 instruments/effects, then rescan. third-party units need the inter-app audio entitlement.")
                 .font(Signalwave.mono(.caption))
                 .foregroundStyle(Signalwave.dim)
         }
@@ -234,13 +175,11 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func pluginRow(_ unit: DiscoveredAudioUnit) -> some View {
+    private func unitRow(_ unit: DiscoveredAudioUnit) -> some View {
         let status = model.statuses[unit.id] ?? .idle
         let isSelected = model.selected.contains(unit.id)
 
         HStack(alignment: .top, spacing: 12) {
-            // Arming target: the checkbox + left signal bar toggle batch select.
-            // The probe-armed marker reads like a checkbox in a capture list.
             Button {
                 model.toggle(unit.id)
             } label: {
@@ -252,8 +191,6 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(isSelected ? "disarm \(unit.name)" : "arm \(unit.name)")
 
-            // Inspect target: tapping the name/body probes this one locally
-            // (no send) and opens the inspector overlay.
             Button {
                 Task { await model.inspect(unit) }
             } label: {
@@ -281,13 +218,13 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("inspect \(unit.name)")
-            .accessibilityHint("probes locally and shows what would be sent")
+            .accessibilityHint("reads this audio unit locally and shows what would be sent")
 
             if status.isWorking {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Signalwave.green)
-            } else if model.hasDump(unit.id) {
+            } else if model.hasDetails(unit.id) {
                 Button {
                     model.prepareExport(for: unit.id)
                 } label: {
@@ -295,16 +232,12 @@ struct ContentView: View {
                         .foregroundStyle(Signalwave.green)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("save dump to files")
+                .accessibilityLabel("save details to files")
             }
         }
         .padding(12)
         .background(isSelected ? Signalwave.surface : Color.clear)
         .overlay(alignment: .leading) {
-            // A left signal bar marks an armed row; tapping it also toggles arm.
-            // The bar stays a 2pt hairline, but the hit area widens to fill the
-            // left padding so it is comfortably tappable without overlapping the
-            // checkbox (which starts after the row's 12pt padding).
             Rectangle()
                 .fill(isSelected ? Signalwave.green : Color.clear)
                 .frame(width: 2)
@@ -321,7 +254,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func statusLabel(_ status: RowStatus) -> some View {
+    private func statusLabel(_ status: AudioUnitRowStatus) -> some View {
         let color: Color = status.isError ? Signalwave.amber : (status.isDone ? Signalwave.green : Signalwave.dim)
         let icon: String = status.isError
             ? "exclamationmark.triangle.fill"
@@ -332,16 +265,6 @@ struct ContentView: View {
             Image(systemName: icon)
         }
         .font(Signalwave.mono(.caption))
-        .foregroundStyle(color)
-    }
-
-    private func consoleLine(_ text: String, icon: String, color: Color) -> some View {
-        Label {
-            Text(text)
-        } icon: {
-            Image(systemName: icon)
-        }
-        .font(Signalwave.mono(.footnote))
         .foregroundStyle(color)
     }
 
@@ -357,7 +280,7 @@ struct ContentView: View {
             }
 
             Button {
-                Task { await model.probeAndSendSelected() }
+                Task { await model.scanAndSendSelected(client: receiver.client) }
             } label: {
                 HStack(spacing: 10) {
                     if model.isBusy {
@@ -371,8 +294,8 @@ struct ContentView: View {
             .buttonStyle(.signalPrimary)
             .disabled(model.isBusy || model.selected.isEmpty)
 
-            if !model.canSend {
-                Text("// no receiver host — plugins are probed and can be exported via the save button.")
+            if !receiver.isConfigured {
+                Text("// no mcp-midi-controller host — units are read and can be exported via the save button.")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
                     .multilineTextAlignment(.leading)
@@ -391,14 +314,15 @@ struct ContentView: View {
     private var sendLabel: String {
         let n = model.selected.count
         if model.isBusy { return "working…" }
-        if n == 0 { return model.canSend ? "probe & send" : "probe" }
-        return model.canSend ? "probe & send \(n)" : "probe \(n)"
+        let configured = receiver.isConfigured
+        if n == 0 { return configured ? "read & send" : "read" }
+        return configured ? "read & send \(n)" : "read \(n)"
     }
 }
 
-/// Identifiable pairing of an inspected plugin id with its stashed dump, used to
-/// drive `.sheet(item:)` (a plain id/String is not `Identifiable`).
-private struct InspectedPlugin: Identifiable {
+/// Identifiable pairing of an inspected unit id with its stashed details, used to
+/// drive `.sheet(item:)` (a plain String is not `Identifiable`).
+private struct InspectedAudioUnit: Identifiable {
     let id: String
-    let dump: ProbeDump
+    let details: AudioUnitDetails
 }

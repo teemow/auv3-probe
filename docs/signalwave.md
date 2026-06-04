@@ -91,28 +91,30 @@ routing), so the interface should feel open-source and modular.
 - **Grid mapping.** A clean, matrix-style patch bay: rows = physical hardware
   (synths, pedalboard), columns = scanned iPad AUv3 hosts / effects.
 
-The shipped SwiftUI screen implements this language directly (it is no longer a
-stock `Form`): a forced-dark charcoal field, monospaced lowercase chrome, a single
-cyber-green signal accent, slate hairline dividers, and a capture-style plugin
-list with armed-row signal bars. UI chrome is lowercased while raw data (plugin
-names, FourCC codes, parameter counts) is shown verbatim. The palette, fonts, wave
-glyph, and components live in `Sources/Theme.swift`; the screen itself is
-`Sources/ContentView.swift`. A console/matrix patch-bay layout (rows = hardware,
-columns = scanned hosts) remains a future step.
+The shipped SwiftUI screens implement this language directly (no longer stock
+`Form`s): a forced-dark charcoal field, monospaced lowercase chrome, a single
+cyber-green signal accent, slate hairline dividers, and capture-style lists with
+armed-row signal bars. UI chrome is lowercased while raw data (unit names, FourCC
+codes, parameter counts) is shown verbatim. The palette, fonts, wave glyph, and
+shared components live in `Sources/Theme.swift`; the app shell is
+`Sources/RootView.swift` (the audio-units console is `Sources/AudioUnitsView.swift`,
+the AUM-sessions ferry is `Sources/AUMSessionsView.swift`). A console/matrix
+patch-bay layout (rows = hardware, columns = scanned hosts) remains a future step.
 
-### Tap to inspect — the per-plugin sniffer view
+### Tap to inspect — the per-unit sniffer view
 
-The "sniffer console that exposes what each plugin broadcasts" is realized by the
-**inspector overlay** (`Sources/ProbeInspectorView.swift`): tapping a plugin opens
-a read-only sheet that lays its parameter tree bare. It is the most direct
-expression of the **no-obfuscation** principle — you see the exact bytes a send
-would POST, on the device, before sending.
+The "sniffer console that exposes what each unit broadcasts" is realized by the
+**inspector overlays** (`Sources/AudioUnitInspectorView.swift` for audio units,
+`Sources/AUMSessionInspectorView.swift` for AUM sessions): tapping a row opens a
+read-only sheet that lays its structure bare. It is the most direct expression of
+the **no-obfuscation** principle — you see the exact data a send would POST, on
+the device, before sending.
 
 Visually it is the same language carried into a `.sheet`: charcoal field, mono
 lowercase chrome, a single green signal accent, slate hairlines, hard edges. The
 summary doubles as a **patch-bay index** — a row of tappable chips (parameter
 groups and preset lists) that isolate one slice of the signal map at a time, the
-schematic grid-mapping instinct applied to a single plugin.
+schematic grid-mapping instinct applied to a single unit.
 
 The interaction mechanics, the section-by-section breakdown, and the
 lazy-rendering performance design live in
