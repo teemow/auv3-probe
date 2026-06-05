@@ -82,4 +82,80 @@ public enum MidiEncoder {
         out[2] = UInt8(max(0, min(127, value)))
         return 3
     }
+
+    /// Note On. `channel` is 1-16; note/velocity clamped to 0-127.
+    @discardableResult
+    public static func noteOn(channel: Int, note: Int, velocity: Int, into out: UnsafeMutablePointer<UInt8>) -> Int {
+        let ch = UInt8((max(1, min(16, channel)) - 1) & 0x0F)
+        out[0] = 0x90 | ch
+        out[1] = UInt8(max(0, min(127, note)))
+        out[2] = UInt8(max(0, min(127, velocity)))
+        return 3
+    }
+
+    /// Note Off. `channel` is 1-16; note/velocity clamped to 0-127.
+    @discardableResult
+    public static func noteOff(channel: Int, note: Int, velocity: Int, into out: UnsafeMutablePointer<UInt8>) -> Int {
+        let ch = UInt8((max(1, min(16, channel)) - 1) & 0x0F)
+        out[0] = 0x80 | ch
+        out[1] = UInt8(max(0, min(127, note)))
+        out[2] = UInt8(max(0, min(127, velocity)))
+        return 3
+    }
+
+    /// System realtime transport byte (Start 0xFA, Continue 0xFB, Stop 0xFC).
+    /// A single status byte with no data bytes.
+    @discardableResult
+    public static func transport(_ kind: TransportKind, into out: UnsafeMutablePointer<UInt8>) -> Int {
+        out[0] = kind.statusByte
+        return 1
+    }
+}
+
+/// The three MIDI system-realtime transport messages the brain can emit.
+public enum TransportKind: UInt8, Sendable {
+    case start
+    case stop
+    case `continue`
+
+    /// The MIDI 1.0 system-realtime status byte.
+    public var statusByte: UInt8 {
+        switch self {
+        case .start: return 0xFA
+        case .continue: return 0xFB
+        case .stop: return 0xFC
+        }
+    }
+}
+
+/// A single MIDI command pushed from the daemon to the brain (the agent's
+/// "hands"). Decoded off the networking thread into a fixed-size value type,
+/// enqueued on a lock-free ring, and emitted from the realtime render block.
+/// All fields are stored as bytes so the struct is trivially copyable with no
+/// retains on the audio thread.
+public struct MidiCommand: Equatable, Sendable {
+    public enum Kind: UInt8, Sendable {
+        case noteOn
+        case noteOff
+        case controlChange
+        case programChange
+        case transportStart
+        case transportStop
+        case transportContinue
+    }
+
+    public var kind: Kind
+    /// 1-16 (ignored for transport kinds).
+    public var channel: UInt8
+    /// note / cc number / program (data1).
+    public var data1: UInt8
+    /// velocity / cc value (data2); 0 where unused.
+    public var data2: UInt8
+
+    public init(kind: Kind, channel: UInt8 = 1, data1: UInt8 = 0, data2: UInt8 = 0) {
+        self.kind = kind
+        self.channel = channel
+        self.data1 = data1
+        self.data2 = data2
+    }
 }

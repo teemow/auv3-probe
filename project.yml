@@ -77,6 +77,11 @@ targets:
       path: Generated/ProbeMidiBrain-Info.plist
       properties:
         CFBundleDisplayName: ProbeMidiBrain
+        NSLocalNetworkUsageDescription: ProbeMidiBrain finds your mcp-midi-controller on the local network to receive MIDI.
+        NSBonjourServices:
+          - _mcpmidi._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         NSExtension:
           NSExtensionPointIdentifier: com.apple.AudioUnit-UI
           NSExtensionPrincipalClass: ProbeMidiBrainViewController
@@ -110,6 +115,11 @@ targets:
       path: Generated/ProbeAudioTap-Info.plist
       properties:
         CFBundleDisplayName: ProbeAudioTap
+        NSLocalNetworkUsageDescription: ProbeAudioTap finds your mcp-midi-controller on the local network to stream audio.
+        NSBonjourServices:
+          - _mcpmidi._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         NSExtension:
           NSExtensionPointIdentifier: com.apple.AudioUnit-UI
           NSExtensionPrincipalClass: ProbeAudioTapViewController

@@ -11,7 +11,16 @@ final class BrainViewModel: ObservableObject {
     private let audioUnit: ProbeMidiBrainAU
     @Published var program: BrainProgram
     @Published var status: BrainStatus
+    /// Rolling tally of every inbound MIDI event AUM routes into the node.
+    @Published var observed = ObservedMidiSummary()
+    /// The latest assembled host-introspection snapshot (refreshed periodically
+    /// and on demand). Logged to os_log each time it is captured.
+    @Published var introspection: HostIntrospection?
     private var timer: Timer?
+    /// Capture + log a full introspection snapshot every Nth poll tick (~3s at
+    /// 0.1s ticks) so idevicesyslog gets a steady stream during analysis.
+    private var tick = 0
+    private static let introspectionEveryTicks = 30
 
     init(audioUnit: ProbeMidiBrainAU) {
         self.audioUnit = audioUnit
@@ -19,11 +28,33 @@ final class BrainViewModel: ObservableObject {
         self.status = audioUnit.status
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            Task { @MainActor in self.status = self.audioUnit.status }
+            Task { @MainActor in self.poll() }
         }
+        captureIntrospection()
     }
 
     deinit { timer?.invalidate() }
+
+    private func poll() {
+        status = audioUnit.status
+        observed = audioUnit.pollObservedMIDI()
+        tick += 1
+        if tick % Self.introspectionEveryTicks == 0 {
+            captureIntrospection()
+        }
+    }
+
+    /// Capture + log a fresh host-introspection snapshot (also fired by the UI's
+    /// "dump" button for an on-demand os_log entry).
+    func captureIntrospection() {
+        introspection = audioUnit.captureIntrospection()
+    }
+
+    /// Reset the observed-MIDI tally (e.g. before a fresh experiment).
+    func resetObserved() {
+        audioUnit.resetObservedMIDI()
+        observed = audioUnit.pollObservedMIDI()
+    }
 
     /// Push the current program into the realtime engine.
     func commit() { audioUnit.updateProgram(program) }
@@ -50,6 +81,35 @@ final class BrainViewModel: ObservableObject {
         program.footswitches.removeAll { $0.id == id }
         commit()
     }
+
+#if DEBUG
+    // Dev-only CoreMIDI backdoor experiment state.
+    @Published var backdoorDestinations: [MidiBackdoor.Destination] = []
+    @Published var backdoorSelection: Int?
+    @Published var backdoorChannel = 1
+    @Published var backdoorCC = 17
+    @Published var backdoorValue = 64
+    @Published var backdoorResult = ""
+
+    func refreshBackdoorDestinations() {
+        backdoorDestinations = audioUnit.backdoor.destinations()
+        if backdoorSelection == nil || !backdoorDestinations.contains(where: { $0.id == backdoorSelection }) {
+            backdoorSelection = backdoorDestinations.first?.id
+        }
+    }
+
+    func sendBackdoorCC() {
+        guard let id = backdoorSelection,
+              let destination = backdoorDestinations.first(where: { $0.id == id }) else {
+            backdoorResult = "no destination selected"
+            return
+        }
+        backdoorResult = audioUnit.backdoor.sendCC(to: destination,
+                                                   channel: backdoorChannel,
+                                                   cc: backdoorCC,
+                                                   value: backdoorValue)
+    }
+#endif
 }
 
 public struct ProbeMidiBrainView: View {
@@ -63,7 +123,13 @@ public struct ProbeMidiBrainView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                DaemonStatusView()
                 statusPanel
+                introspectionPanel
+                observedPanel
+#if DEBUG
+                backdoorPanel
+#endif
                 sectionsPanel
                 footswitchPanel
                 outputPanel
@@ -101,6 +167,7 @@ public struct ProbeMidiBrainView: View {
                      color: model.status.playing ? Signalwave.green : Signalwave.dim)
                 chip("section: \(label(forSection: model.status.sectionIndex))")
                 chip("scene: \(model.status.scene < 0 ? "-" : String(model.status.scene))")
+                chip("commands: \(model.status.commandCount)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -113,6 +180,156 @@ public struct ProbeMidiBrainView: View {
         guard index >= 0 && index < ordered.count else { return "-" }
         return ordered[index].name
     }
+
+    // MARK: - Host introspection (control-surface readback)
+
+    private var introspectionPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SectionHeader("host introspection")
+                Spacer()
+                Button { model.captureIntrospection() } label: { Label("dump", systemImage: "doc.text.magnifyingglass") }
+                    .buttonStyle(.signalGhost)
+            }
+            if let snapshot = model.introspection {
+                let transport = snapshot.transport
+                let context = snapshot.musicalContext
+                let session = snapshot.audioSession
+                WrapLayout(spacing: 6, lineSpacing: 4) {
+                    SignalChip(text: transport.available ? (transport.moving ? "transport: moving" : "transport: stopped") : "transport: n/a",
+                               color: transport.available ? Signalwave.green : Signalwave.dim)
+                    if transport.recording { SignalChip(text: "recording", color: Signalwave.amber) }
+                    if transport.cycling { SignalChip(text: "cycling") }
+                    SignalChip(text: context.available ? "tempo: \(String(format: "%.1f", context.tempo))" : "tempo: n/a",
+                               color: context.available ? Signalwave.green : Signalwave.dim)
+                    SignalChip(text: "sig: \(String(format: "%g", context.timeSignatureNumerator))/\(context.timeSignatureDenominator)")
+                    SignalChip(text: "beat: \(String(format: "%.2f", context.currentBeatPosition))")
+                    SignalChip(text: "rate: \(Int(session.sampleRate))hz")
+                    SignalChip(text: "buf: \(Int((session.ioBufferDuration * session.sampleRate).rounded()))")
+                    SignalChip(text: session.isOtherAudioPlaying ? "other-audio: yes" : "other-audio: no",
+                               color: session.isOtherAudioPlaying ? Signalwave.amber : Signalwave.dim)
+                    SignalChip(text: "midi-out: \(snapshot.render.midiOutputNames.joined(separator: ","))")
+                }
+                introspectionDetail(title: "audio route in", items: session.inputPorts)
+                introspectionDetail(title: "audio route out", items: session.outputPorts)
+                introspectionDetail(title: "coremidi sources (\(snapshot.coreMIDI.sources.count))",
+                                    items: snapshot.coreMIDI.sources.map(endpointLabel))
+                introspectionDetail(title: "coremidi destinations (\(snapshot.coreMIDI.destinations.count))",
+                                    items: snapshot.coreMIDI.destinations.map(endpointLabel))
+            } else {
+                Text("capturing…")
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .signalField()
+    }
+
+    private func endpointLabel(_ endpoint: HostIntrospection.CoreMIDISnapshot.Endpoint) -> String {
+        let primary = endpoint.displayName.isEmpty ? endpoint.name : endpoint.displayName
+        return endpoint.device.isEmpty ? primary : "\(endpoint.device) · \(primary)"
+    }
+
+    @ViewBuilder
+    private func introspectionDetail(title: String, items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(Signalwave.mono(.caption2, weight: .semibold))
+                .foregroundStyle(Signalwave.dim)
+            if items.isEmpty {
+                Text("—")
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
+            } else {
+                ForEach(items, id: \.self) { item in
+                    Text(item)
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+    }
+
+    // MARK: - Observed MIDI (what AUM delivers)
+
+    private var observedPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SectionHeader("observed midi in")
+                Spacer()
+                Button { model.resetObserved() } label: { Label("reset", systemImage: "arrow.counterclockwise") }
+                    .buttonStyle(.signalGhost)
+            }
+            let observed = model.observed
+            WrapLayout(spacing: 6, lineSpacing: 4) {
+                SignalChip(text: "total: \(observed.total)")
+                SignalChip(text: "note on: \(observed.noteOn)")
+                SignalChip(text: "note off: \(observed.noteOff)")
+                SignalChip(text: "cc: \(observed.controlChange)")
+                SignalChip(text: "pc: \(observed.programChange)")
+                SignalChip(text: "pitch: \(observed.pitchBend)")
+                SignalChip(text: "clock: \(observed.clock)", color: observed.clock > 0 ? Signalwave.green : Signalwave.dim)
+                SignalChip(text: "start/stop/cont: \(observed.start)/\(observed.stop)/\(observed.continue)")
+                SignalChip(text: "sysex: \(observed.sysex)", color: observed.sysex > 0 ? Signalwave.amber : Signalwave.dim)
+                SignalChip(text: "other: \(observed.other)")
+            }
+            HStack(spacing: 8) {
+                chip("channels: \(observed.channels.isEmpty ? "-" : observed.channels.map(String.init).joined(separator: ","))")
+                chip("last: \(observed.lastMessage.isEmpty ? "-" : observed.lastMessage)")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .signalField()
+    }
+
+#if DEBUG
+    // MARK: - CoreMIDI backdoor (dev-only)
+
+    private var backdoorPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SectionHeader("coremidi backdoor · dev")
+                Spacer()
+                Button { model.refreshBackdoorDestinations() } label: { Label("scan", systemImage: "antenna.radiowaves.left.and.right") }
+                    .buttonStyle(.signalGhost)
+            }
+            if model.backdoorDestinations.isEmpty {
+                Text("scan to enumerate coremidi destinations")
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
+            } else {
+                Picker("destination", selection: $model.backdoorSelection) {
+                    ForEach(model.backdoorDestinations) { destination in
+                        Text(destination.label).tag(Optional(destination.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(Signalwave.green)
+                HStack(spacing: 14) {
+                    intStepperField(label: "ch", value: $model.backdoorChannel, range: 1...16)
+                    intStepperField(label: "cc", value: $model.backdoorCC, range: 0...127)
+                    intStepperField(label: "val", value: $model.backdoorValue, range: 0...127)
+                }
+                Button { model.sendBackdoorCC() } label: { Label("send cc direct", systemImage: "paperplane") }
+                    .buttonStyle(.signalGhost(Signalwave.amber))
+            }
+            if !model.backdoorResult.isEmpty {
+                Text(model.backdoorResult)
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.fg)
+                    .lineLimit(2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .signalField()
+    }
+#endif
 
     // MARK: - Sections
 

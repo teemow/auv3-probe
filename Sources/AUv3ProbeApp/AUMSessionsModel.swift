@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import ProbeKit
 
@@ -404,6 +405,53 @@ final class AUMSessionsModel: ObservableObject {
         } catch {
             statuses[entry.id] = .failed(friendly(error))
         }
+    }
+
+    // MARK: - Push & open (one-tap load into AUM)
+
+    /// Download `entry`, write it into the linked AUM folder, then open AUM's
+    /// Universal Link so AUM loads the session (applying its MIDI matrix). This
+    /// is the one-tap "author → load" step of the agent loop. A linked folder is
+    /// required because AUM resolves the session by name from its own folder.
+    func pushAndOpen(_ entry: AUMSessionEntry, client: DaemonClient?, folder: AUMFolderBookmark) async {
+        guard let client = client else {
+            statuses[entry.id] = .failed(Self.noHostRow)
+            return
+        }
+        guard folder.isBound else {
+            statuses[entry.id] = .failed("link the AUM folder first (needed to load by name)")
+            return
+        }
+        statuses[entry.id] = .downloading
+        guard let (data, filename) = await fetchBytes(entry, client: client) else { return }
+        do {
+            // Write to the AUM folder root so AUM can resolve it by name.
+            try folder.write(data: data, filename: filename)
+            refreshFolder(folder)
+        } catch {
+            statuses[entry.id] = .failed(friendly(error))
+            return
+        }
+        guard let url = Self.aumOpenURL(filename: filename) else {
+            statuses[entry.id] = .failed("bad session name for the AUM link")
+            return
+        }
+        let opened = await UIApplication.shared.open(url)
+        statuses[entry.id] = opened ? .saved : .failed("AUM did not open (is it installed?)")
+    }
+
+    /// Build AUM's Universal Link to open a session by filename:
+    /// `https://kymatica.com/aum/open/<name>.aumproj`.
+    static func aumOpenURL(filename: String) -> URL? {
+        let name = filename.isEmpty ? "session.aumproj" : filename
+        // Escape `/` too (it is allowed in `.urlPathAllowed`) so a name can never
+        // inject extra path segments into the Universal Link.
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove("/")
+        guard let encoded = name.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            return nil
+        }
+        return URL(string: "https://kymatica.com/aum/open/\(encoded)")
     }
 
     /// Resolve the share sheet's completion: clean up the temp file and reflect

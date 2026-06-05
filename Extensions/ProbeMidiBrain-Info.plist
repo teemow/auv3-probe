@@ -6,6 +6,16 @@
     <string>ProbeMidiBrain</string>
     <key>CFBundleName</key>
     <string>ProbeMidiBrain</string>
+    <!-- Bonjour discovery of mcp-midi-controller runs in the extension process,
+         so it needs its own Local Network permission + browsed service type. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ProbeMidiBrain finds your mcp-midi-controller on the local network to receive MIDI.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_mcpmidi._tcp</string>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict><key>NSAllowsLocalNetworking</key><true/></dict>
     <!-- An AUv3 audio unit with a UI is a classic NSExtension (com.apple.AudioUnit-UI),
          not an ExtensionKit extension. The principal class is the AUViewController
          that also conforms to AUAudioUnitFactory; @objc(...) in the Swift source

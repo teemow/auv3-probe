@@ -43,7 +43,11 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>AUv3 Probe sends plugin parameter dumps to a receiver on your local network.</string>
+	<string>AUv3 Probe finds and talks to your mcp-midi-controller on the local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mcpmidi._tcp</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

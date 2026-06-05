@@ -6,6 +6,16 @@
     <string>ProbeAudioTap</string>
     <key>CFBundleName</key>
     <string>ProbeAudioTap</string>
+    <!-- Bonjour discovery of mcp-midi-controller runs in the extension process,
+         so it needs its own Local Network permission + browsed service type. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ProbeAudioTap finds your mcp-midi-controller on the local network to stream audio.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_mcpmidi._tcp</string>
+    </array>
+    <key>NSAppTransportSecurity</key>
+    <dict><key>NSAllowsLocalNetworking</key><true/></dict>
     <!-- AUv3 audio effect with a UI: a classic NSExtension (com.apple.AudioUnit-UI).
          The principal class is the AUViewController / AUAudioUnitFactory; @objc(...)
          in the Swift source pins these bare class names under SwiftPM mangling. -->

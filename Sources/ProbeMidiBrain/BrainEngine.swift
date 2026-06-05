@@ -64,9 +64,38 @@ final class BrainEngine: @unchecked Sendable {
     var musicalContext: AUHostMusicalContextBlock?
     var transportState: AUHostTransportStateBlock?
 
+    // Lock-free command ring: the BrainController networking thread pushes
+    // MIDI commands decoded off the /midi-control WebSocket (the agent's
+    // "hands"); the render thread drains and emits them via midiOut. Sized for a
+    // generous burst of agent-driven commands; overflow is dropped by the ring.
+    let commandRing = MidiCommandRing(capacity: 256)
+
+    // Lock-free observed-MIDI ring: the render thread pushes EVERY inbound event
+    // (channel voice, system-realtime, sysex leaders) for the host control-
+    // surface analysis; a UI/report thread drains it to tally what AUM delivers.
+    // Sized to absorb a burst of clock (24 ppqn) plus notes between UI drains.
+    let observedRing = ObservedMidiRing(capacity: 1024)
+
+    // Latest sanctioned host readback (transport + musical context), captured on
+    // the render thread and read by the introspection report off the render
+    // thread. Written via a non-blocking try-lock so the render thread never
+    // blocks on the UI/report reader.
+    private struct HostState {
+        var transport = HostIntrospection.Transport()
+        var musicalContext = HostIntrospection.MusicalContext()
+    }
+    private let hostState = OSAllocatedUnfairLock(initialState: HostState())
+
     // Render-thread-only carry-over (only the render thread mutates these).
     private var lastEmittedScene = -1
     private var lastSectionIndex = -1
+    // Transport/context carried from captureHostState to evaluateTransport so the
+    // host blocks are read exactly once per cycle.
+    private var lastMoving = false
+    private var lastHaveContext = false
+    private var lastBeat: Double = 0
+    // Scratch command reused while draining the ring (no per-cycle allocation).
+    private var scratchCommand = MidiCommand(kind: .noteOff)
 
     // Status mirrored for the UI (written on the render thread, read on main).
     let statusSection = ManagedAtomic<Int>(-1)
@@ -74,6 +103,8 @@ final class BrainEngine: @unchecked Sendable {
     let statusPlaying = ManagedAtomic<Bool>(false)
     /// Bumped every time a scene change is emitted, so the UI can flash activity.
     let statusEmitCount = ManagedAtomic<Int>(0)
+    /// Bumped every time a command from the LAN channel is emitted.
+    let statusCommandCount = ManagedAtomic<Int>(0)
 
     /// Publish a new program (called from the main/UI thread).
     func setProgram(_ newProgram: BrainProgram) {
@@ -85,9 +116,22 @@ final class BrainEngine: @unchecked Sendable {
     func reset() {
         lastEmittedScene = -1
         lastSectionIndex = -1
+        lastMoving = false
+        lastHaveContext = false
+        lastBeat = 0
         statusSection.store(-1, ordering: .relaxed)
         statusScene.store(-1, ordering: .relaxed)
         statusEmitCount.store(0, ordering: .relaxed)
+        statusCommandCount.store(0, ordering: .relaxed)
+        hostState.withLock { $0 = HostState() }
+    }
+
+    /// The latest sanctioned host readback, for the introspection report. Read
+    /// off the render thread (UI/report timer); the render thread writes it via a
+    /// non-blocking try-lock.
+    func hostSnapshot() -> (transport: HostIntrospection.Transport,
+                            musicalContext: HostIntrospection.MusicalContext) {
+        hostState.withLock { ($0.transport, $0.musicalContext) }
     }
 
     // MARK: - Render
@@ -117,13 +161,31 @@ final class BrainEngine: @unchecked Sendable {
                 }
             }
 
-            // Evaluate under a non-blocking try-lock. If the UI thread is mid-edit
-            // we skip this cycle (harmless for MIDI, never blocks audio). All work
-            // happens *inside* the closure so the program is never copied out (no
-            // array retains on the audio thread); the arrays are read by index.
-            let inputs = RenderInputs(events: eventListHead, sampleTime: timestamp.pointee.mSampleTime)
-            self.program.withLockIfAvailable { prog in
-                // 1) Footswitch input: walk the realtime event list.
+            let sampleTime = timestamp.pointee.mSampleTime
+
+            // 0) Drain the LAN command ring (the agent's "hands") and emit each
+            // command via midiOut at the current sample time. This is realtime-
+            // safe: the ring pop is wait-free/allocation-free and does not touch
+            // the program lock, so direct agent commands flow even while the UI
+            // is mid-edit. midiOut is only ever called here (the render thread).
+            self.drainCommands(at: sampleTime)
+
+            // 1) Capture the sanctioned host readback (transport + musical
+            // context) into the introspection snapshot, every cycle, independent
+            // of the program lock. Also publishes statusPlaying and the
+            // carry-over evaluateTransport consumes (so the host blocks are read
+            // exactly once per cycle).
+            self.captureHostState()
+
+            // 2) Evaluate footswitch input + section boundaries under a
+            // non-blocking try-lock. If the UI thread is mid-edit we skip
+            // evaluation this cycle (harmless for MIDI, never blocks audio). All
+            // work happens *inside* the closure so the program is never copied
+            // out (no array retains on the audio thread); arrays are read by
+            // index. handleMIDI also records every inbound event into the
+            // observed-MIDI ring.
+            let inputs = RenderInputs(events: eventListHead, sampleTime: sampleTime)
+            let evaluated: Bool? = self.program.withLockIfAvailable { prog in
                 var event = inputs.events
                 while let raw = event {
                     let head = raw.pointee.head
@@ -132,17 +194,93 @@ final class BrainEngine: @unchecked Sendable {
                     }
                     event = UnsafePointer(head.next)
                 }
-                // 2) Transport-driven section boundaries.
                 self.evaluateTransport(program: &prog, at: inputs.sampleTime)
+                return true
+            }
+
+            // 3) If the program lock was unavailable (UI mid-edit) we skipped the
+            // walk above — but the analysis must still see EVERY inbound event, so
+            // capture them here without touching the program.
+            if evaluated == nil {
+                var event = inputs.events
+                while let raw = event {
+                    let head = raw.pointee.head
+                    if head.eventType == .MIDI {
+                        self.observe(raw.pointee.MIDI, at: inputs.sampleTime)
+                    }
+                    event = UnsafePointer(head.next)
+                }
             }
 
             return noErr
         }
     }
 
-    // MARK: - MIDI in (footswitch)
+    // MARK: - LAN command channel (the "hands")
+
+    /// Drain every queued LAN command and emit it via midiOut. Realtime-safe:
+    /// pops are wait-free, the byte building uses a stack tuple (no allocation),
+    /// and midiOut is the host-provided realtime block. Called only on the
+    /// render thread.
+    private func drainCommands(at sampleTime: Double) {
+        guard let midiOut = midiOut else {
+            // No output block yet: drain and discard so the ring cannot back up.
+            while commandRing.pop(into: &scratchCommand) {}
+            return
+        }
+        var emitted = 0
+        while commandRing.pop(into: &scratchCommand) {
+            let cmd = scratchCommand
+            var out = (UInt8(0), UInt8(0), UInt8(0))
+            let length: Int = withUnsafeMutablePointer(to: &out.0) { ptr in
+                switch cmd.kind {
+                case .noteOn:
+                    return MidiEncoder.noteOn(channel: Int(cmd.channel), note: Int(cmd.data1), velocity: Int(cmd.data2), into: ptr)
+                case .noteOff:
+                    return MidiEncoder.noteOff(channel: Int(cmd.channel), note: Int(cmd.data1), velocity: Int(cmd.data2), into: ptr)
+                case .controlChange:
+                    return MidiEncoder.controlChange(channel: Int(cmd.channel), cc: Int(cmd.data1), value: Int(cmd.data2), into: ptr)
+                case .programChange:
+                    return MidiEncoder.programChange(channel: Int(cmd.channel), program: Int(cmd.data1), into: ptr)
+                case .transportStart:
+                    return MidiEncoder.transport(.start, into: ptr)
+                case .transportStop:
+                    return MidiEncoder.transport(.stop, into: ptr)
+                case .transportContinue:
+                    return MidiEncoder.transport(.continue, into: ptr)
+                }
+            }
+            _ = withUnsafePointer(to: &out.0) { ptr in
+                midiOut(AUEventSampleTime(sampleTime), 0, length, ptr)
+            }
+            emitted += 1
+        }
+        if emitted > 0 {
+            statusCommandCount.wrappingIncrement(by: emitted, ordering: .relaxed)
+        }
+    }
+
+    // MARK: - MIDI in (capture + footswitch)
+
+    /// Record one inbound event into the observed-MIDI ring. Captures EVERYTHING
+    /// (channel voice, system-realtime, sysex leaders) so the analysis can
+    /// characterise AUM's delivery — not just the messages the footswitch matcher
+    /// reacts to. Wait-free and allocation-free (the ring drops on overflow).
+    private func observe(_ midi: AUMIDIEvent, at sampleTime: Double) {
+        let data = midi.data
+        observedRing.push(ObservedMidiEvent(
+            sampleTime: sampleTime,
+            length: midi.length,
+            cable: midi.cable,
+            byte0: data.0, byte1: data.1, byte2: data.2
+        ))
+    }
 
     private func handleMIDI(_ midi: AUMIDIEvent, program prog: inout RenderProgram, at sampleTime: Double) {
+        // Capture every inbound event first (incl. clock/transport/sysex that the
+        // footswitch matcher below ignores) for the host control-surface analysis.
+        observe(midi, at: sampleTime)
+
         // AUMIDIEvent.data is a fixed 3-byte tuple; read only `length` bytes.
         let length = Int(midi.length)
         guard length >= 1 else { return }
@@ -199,21 +337,73 @@ final class BrainEngine: @unchecked Sendable {
         emitScene(target, program: &prog, at: sampleTime)
     }
 
+    // MARK: - Host introspection capture
+
+    /// Read the sanctioned host blocks once per cycle and publish: (a) the full
+    /// transport + musical-context snapshot for the introspection report, (b)
+    /// statusPlaying for the UI, (c) the carry-over evaluateTransport consumes.
+    /// Called on the render thread, outside the program lock.
+    private func captureHostState() {
+        var transport = HostIntrospection.Transport()
+        if let transportState = transportState {
+            var flags = AUHostTransportStateFlags(rawValue: 0)
+            var samplePosition: Double = 0
+            var cycleStart: Double = 0
+            var cycleEnd: Double = 0
+            if transportState(&flags, &samplePosition, &cycleStart, &cycleEnd) {
+                transport.available = true
+                transport.moving = flags.contains(.moving)
+                transport.recording = flags.contains(.recording)
+                transport.cycling = flags.contains(.cycling)
+                transport.samplePosition = samplePosition
+                transport.cycleStartBeat = cycleStart
+                transport.cycleEndBeat = cycleEnd
+            }
+        }
+
+        var context = HostIntrospection.MusicalContext()
+        if let musicalContext = musicalContext {
+            var tempo: Double = 0
+            var tsNumerator: Double = 0
+            var tsDenominator: Int = 0
+            var beat: Double = 0
+            var sampleOffset: Int = 0
+            var downbeat: Double = 0
+            if musicalContext(&tempo, &tsNumerator, &tsDenominator, &beat, &sampleOffset, &downbeat) {
+                context.available = true
+                context.tempo = tempo
+                context.timeSignatureNumerator = tsNumerator
+                context.timeSignatureDenominator = tsDenominator
+                context.currentBeatPosition = beat
+                context.sampleOffsetToNextBeat = sampleOffset
+                context.currentMeasureDownbeatPosition = downbeat
+            }
+        }
+
+        // Carry-over for evaluateTransport (render-thread-only).
+        lastMoving = transport.moving
+        lastHaveContext = context.available
+        lastBeat = context.currentBeatPosition
+        statusPlaying.store(transport.moving, ordering: .relaxed)
+
+        // Publish the snapshot for the report; skip if the reader holds the lock.
+        // Capture immutable copies so the @Sendable lock closure carries value
+        // types (avoids capturing the mutable locals built above).
+        let transportSnapshot = transport
+        let contextSnapshot = context
+        hostState.withLockIfAvailable { state in
+            state.transport = transportSnapshot
+            state.musicalContext = contextSnapshot
+        }
+    }
+
     // MARK: - Transport
 
     private func evaluateTransport(program prog: inout RenderProgram, at sampleTime: Double) {
-        guard let transportState = transportState else { return }
-        var flags = AUHostTransportStateFlags(rawValue: 0)
-        let haveTransport = transportState(&flags, nil, nil, nil)
-        let moving = haveTransport && flags.contains(.moving)
-        statusPlaying.store(moving, ordering: .relaxed)
-        guard moving, let musicalContext = musicalContext else { return }
+        // Consume the readback captured by captureHostState this cycle.
+        guard lastMoving, lastHaveContext else { return }
 
-        var beat: Double = 0
-        let haveContext = musicalContext(nil, nil, nil, &beat, nil, nil)
-        guard haveContext else { return }
-
-        let index = prog.sectionIndex(atBeat: beat)
+        let index = prog.sectionIndex(atBeat: lastBeat)
         guard index >= 0, index != lastSectionIndex else {
             if index >= 0 { statusSection.store(index, ordering: .relaxed) }
             return

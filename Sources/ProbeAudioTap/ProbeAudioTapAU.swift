@@ -10,7 +10,7 @@ import ProbeKit
 // giving an AI agent "ears" on the rig.
 //
 // Realtime work lives in TapDSP; networking lives in TapStreamer. This class is
-// the AUAudioUnit shell: busses, config (stream host / decimation) persisted in
+// the AUAudioUnit shell: busses, config (streaming flag) persisted in
 // fullState, and lifecycle wiring of the streamer.
 @objc(ProbeAudioTapAU)
 public final class ProbeAudioTapAU: AUAudioUnit {
@@ -44,8 +44,6 @@ public final class ProbeAudioTapAU: AUAudioUnit {
         outputBus = try AUAudioUnitBus(format: format)
         inputBusArray = AUAudioUnitBusArray(audioUnit: self, busType: .input, busses: [inputBus])
         outputBusArray = AUAudioUnitBusArray(audioUnit: self, busType: .output, busses: [outputBus])
-
-        dsp.decimation.store(TapConfig().decimation, ordering: .relaxed)
     }
 
     // MARK: - Busses
@@ -58,10 +56,8 @@ public final class ProbeAudioTapAU: AUAudioUnit {
 
     // MARK: - Config (UI API)
 
-    /// Replace the config: persists, applies decimation, and (re)starts or stops
-    /// the stream as needed.
+    /// Replace the config: persists and (re)starts or stops the stream as needed.
     public func updateConfig(_ newConfig: TapConfig) {
-        dsp.decimation.store(max(1, newConfig.decimation), ordering: .relaxed)
         control.withLock { state in
             state.config = newConfig
             applyStreamingStateLocked(&state)
@@ -69,10 +65,12 @@ public final class ProbeAudioTapAU: AUAudioUnit {
     }
 
     /// Apply the streaming on/off state. Must be called with `control` held.
+    /// The host comes from Bonjour discovery (DaemonDiscovery), so the streamer
+    /// finds the daemon itself and auto-reconnects.
     private func applyStreamingStateLocked(_ state: inout ControlState) {
-        if state.config.streaming, !state.config.host.isEmpty, let streamer = state.streamer {
+        if state.config.streaming, let streamer = state.streamer {
             dsp.capturing.store(true, ordering: .relaxed)
-            streamer.start(host: state.config.host)
+            streamer.start()
         } else {
             dsp.capturing.store(false, ordering: .relaxed)
             state.streamer?.stop()
@@ -81,19 +79,16 @@ public final class ProbeAudioTapAU: AUAudioUnit {
 
     /// Status for the UI meter.
     public var levels: (peak: Float, rms: Float) { dsp.levels }
-    public var isConnected: Bool {
-        control.withLock { $0.streamer?.connected.load(ordering: .relaxed) ?? false }
-    }
 
     // MARK: - Render resources
 
     public override func allocateRenderResources() throws {
         try super.allocateRenderResources()
         let rate = outputBus.format.sampleRate
-        dsp.prepare(maxFrames: Int(maximumFramesToRender))
+        let channels = Int(outputBus.format.channelCount)
+        dsp.prepare(maxFrames: Int(maximumFramesToRender), channels: channels)
         control.withLock { state in
-            dsp.decimation.store(max(1, state.config.decimation), ordering: .relaxed)
-            state.streamer = TapStreamer(dsp: dsp, sampleRate: rate)
+            state.streamer = TapStreamer(dsp: dsp, sampleRate: rate, channels: channels)
             applyStreamingStateLocked(&state)
         }
     }
@@ -117,8 +112,9 @@ public final class ProbeAudioTapAU: AUAudioUnit {
     public override var fullState: [String: Any]? {
         get {
             var state = super.fullState ?? [:]
-            // The stream host is installation-specific; persisting it inside the
-            // AUM session (on-device) is fine and never committed to git.
+            // Persist the tap's config (streaming flag + decimation) inside the
+            // AUM session, per node. The daemon host is not stored here — it is
+            // found via Bonjour discovery (DaemonDiscovery).
             if let data = try? JSONEncoder().encode(config) {
                 state[Self.configStateKey] = data
             }
@@ -135,17 +131,16 @@ public final class ProbeAudioTapAU: AUAudioUnit {
 }
 
 /// Persisted configuration for ProbeAudioTap.
+///
+/// The host is not stored here — the daemon is found via Bonjour discovery
+/// (DaemonDiscovery). Only the streaming flag is per-node `fullState`. (A `host`
+/// or legacy `decimation` left over in an older session's JSON is simply ignored
+/// on decode.)
 public struct TapConfig: Codable, Equatable {
-    /// mcp-midi-controller `host[:port]` (LAN). Entered at runtime, never committed.
-    public var host: String
     /// Whether the tap is actively streaming.
     public var streaming: Bool
-    /// Integer downsample factor applied to the mono tap (1 = full rate).
-    public var decimation: Int
 
-    public init(host: String = "", streaming: Bool = false, decimation: Int = 4) {
-        self.host = host
+    public init(streaming: Bool = false) {
         self.streaming = streaming
-        self.decimation = decimation
     }
 }

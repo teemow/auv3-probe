@@ -36,6 +36,17 @@ device*. Four jobs, in the order they are being built:
 4. **Assist "threefoot".** Help the pedalboard footswitch load scenes or songs
    (ProbeMidiBrain's footswitch→scene mapping is the first step).
 
+The throughline for jobs 3 + 4 is bigger than it first looks: hosted inside AUM,
+`ProbeMidiBrain` can reach almost AUM's **entire** control surface over MIDI —
+transport, tempo, mixer, **any node parameter**, and **session load** (measured
+in [aum-control-surface.md](aum-control-surface.md)). The catch is that it only
+reaches what the loaded session has **mapped**. So the brain's value as an AUM
+controller depends entirely on (a) how well the orchestrator **understands AUM
+sessions** and (b) whether every session carries a **standard MIDI-control
+mapping** so the brain can change scenes deterministically. That vision lives in
+the orchestrator repo:
+[mcp-midi-controller / aum-brain-control.md](https://github.com/teemow/mcp-midi-controller/blob/main/docs/aum-brain-control.md).
+
 The app is one shell (`RootView`) with a shared daemon-host bar over a `TabView`:
 an **audio-units** tab (job 1) and an **AUM-sessions** tab (job 2). Both talk to
 the same LAN daemon through one `DaemonClient`, pointed at one host held in the
@@ -270,7 +281,9 @@ this), shared by both build systems:
 |------|------|
 | **ProbeKit (shared)** | |
 | `Sources/ProbeKit/Theme.swift` | The **signalwave** design system: palette (`Signalwave.*`), monospaced fonts, the `WaveGlyph`, button styles, field + section-header surfaces, and the shared `SignalChip` / `FlowChips` / `WrapLayout`. Public so the extensions' UIs reuse it. |
-| `Sources/ProbeKit/Receiver.swift` | Shared connection state: daemon `host` (persisted in `UserDefaults`), `healthz` test, and the `DaemonClient` factory. Injected as an `EnvironmentObject`. |
+| `Sources/ProbeKit/Receiver.swift` | App connection state, driven by Bonjour discovery: exposes `isConfigured` and the `DaemonClient` factory for the discovered daemon. Injected as an `EnvironmentObject`. |
+| `Sources/ProbeKit/DaemonDiscovery.swift` | Bonjour/mDNS discovery of `mcp-midi-controller` (`_mcpmidi._tcp`): resolves `host:port`, reads version/capabilities from the TXT record, polls `healthz`. The single host source for the app and both extensions. |
+| `Sources/ProbeKit/DaemonStatusView.swift` | The one status element shared verbatim by all three surfaces (app + both AUv3 UIs): discovered IP, connection status, daemon capabilities, and version. |
 | `Sources/ProbeKit/DaemonClient.swift` | The single LAN client to the daemon: audio-unit POSTs (`/auv3-probe`, `/auv3-probe/diagnostics`), AUM-session upload/list/download/map, `/healthz`, and `webSocketURL(path:)` (used by ProbeAudioTap); `DaemonError`. |
 | `Sources/ProbeKit/AudioUnitDetails.swift` | The cross-repo JSON schema mirror (`AudioUnitDetails` / `AudioUnitComponent` / `ParameterInfo` / `PresetInfo`) + scan report types (`ScanReport` / `ScanResult` / `ScanDevice`) + `fileID` / `sanitizeID`. |
 | `Sources/ProbeKit/AUMSessionModels.swift` | The cross-repo JSON mirror for the session endpoints (`AUMSessionSummary` / `AUMSessionEntry`) and the parsed map (`AUMSessionMap` / `ChannelInfo` / `NodeInfo` / `MappingInfo`). |
@@ -332,10 +345,10 @@ this), shared by both build systems:
 - **`keyPath` is recorded, not just `address`.** `address` can change if a unit
   rearranges its tree; `keyPath` is the stable identifier, so a future re-read
   can detect when an update reshuffles parameters.
-- **The last daemon host is remembered, but never committed.** The `host[:port]`
-  is persisted **on-device** in `UserDefaults` (in the shared `Receiver`) so it
-  does not have to be retyped every launch. It is a local LAN address entered at
-  runtime and never written to git, so this still satisfies the public-repo rule.
+- **The daemon is discovered, never typed.** Its `host:port` is found via
+  Bonjour (`DaemonDiscovery`, service `_mcpmidi._tcp`) by the app and both AUv3
+  extensions alike, so nothing is persisted and nothing LAN-specific is ever
+  written to git — satisfying the public-repo rule by construction.
 - **All outcomes are reported, not just successes.** Read failures, empty trees,
   and sanitized non-finite values are captured per run and POSTed to
   `/auv3-probe/diagnostics`, so the receiver — not just the app UI — has the full

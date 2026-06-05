@@ -2,9 +2,10 @@ import SwiftUI
 import Combine
 import ProbeKit
 
-// The control surface for ProbeAudioTap: stream target host, decimation, a
-// start/stop toggle, a live level meter (peak/RMS), and connection status — in
-// the signalwave language.
+// The control surface for ProbeAudioTap: a start/stop toggle, a live level
+// meter (peak/RMS), and connection status — in the signalwave language. Audio is
+// streamed full-rate and full-fidelity (interleaved, no decimation), so there is
+// no quality knob to tune.
 
 @MainActor
 final class TapViewModel: ObservableObject {
@@ -12,7 +13,6 @@ final class TapViewModel: ObservableObject {
     @Published var config: TapConfig
     @Published var peak: Float = 0
     @Published var rms: Float = 0
-    @Published var connected: Bool = false
     private var timer: Timer?
 
     init(audioUnit: ProbeAudioTapAU) {
@@ -24,7 +24,6 @@ final class TapViewModel: ObservableObject {
                 let levels = self.audioUnit.levels
                 self.peak = levels.peak
                 self.rms = levels.rms
-                self.connected = self.audioUnit.isConnected
             }
         }
     }
@@ -45,6 +44,7 @@ public struct ProbeAudioTapView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                DaemonStatusView()
                 meterPanel
                 targetPanel
                 streamPanel
@@ -112,36 +112,13 @@ public struct ProbeAudioTapView: View {
 
     private var targetPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionHeader("stream target")
-            Text("// mcp-midi-controller host on your lan")
+            SectionHeader("stream options")
+            Text("// streams to the auto-discovered daemon")
                 .font(Signalwave.mono(.caption2))
                 .foregroundStyle(Signalwave.dim)
-            HStack(spacing: 8) {
-                Text(">")
-                    .font(Signalwave.mono(.body, weight: .bold))
-                    .foregroundStyle(Signalwave.green)
-                TextField("host:7800", text: $model.config.host)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .font(Signalwave.mono(.body))
-                    .foregroundStyle(Signalwave.fg)
-                    .tint(Signalwave.green)
-                    .onSubmit { model.commit() }
-            }
-            .signalField()
-            HStack(spacing: 8) {
-                Text("decimation")
-                    .font(Signalwave.mono(.caption))
-                    .foregroundStyle(Signalwave.dim)
-                Text("\(model.config.decimation)x")
-                    .font(Signalwave.mono(.body))
-                    .foregroundStyle(Signalwave.fg)
-                Stepper("", value: $model.config.decimation, in: 1...32)
-                    .labelsHidden()
-                    .tint(Signalwave.green)
-                    .onChange(of: model.config.decimation) { _ in model.commit() }
-            }
+            Text("// full-rate · interleaved · native channels")
+                .font(Signalwave.mono(.caption2))
+                .foregroundStyle(Signalwave.dim)
         }
         .padding(12)
         .signalField()
@@ -151,14 +128,7 @@ public struct ProbeAudioTapView: View {
 
     private var streamPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                SectionHeader("stream")
-                Spacer()
-                Label(model.connected ? "connected" : "offline",
-                      systemImage: model.connected ? "dot.radiowaves.left.and.right" : "wifi.slash")
-                    .font(Signalwave.mono(.caption2))
-                    .foregroundStyle(model.connected ? Signalwave.green : Signalwave.dim)
-            }
+            SectionHeader("stream")
             Button {
                 model.config.streaming.toggle()
                 model.commit()
@@ -166,7 +136,6 @@ public struct ProbeAudioTapView: View {
                 Text(model.config.streaming ? "stop streaming" : "start streaming")
             }
             .buttonStyle(.signalPrimary)
-            .disabled(model.config.host.isEmpty)
         }
         .padding(12)
         .signalField()
