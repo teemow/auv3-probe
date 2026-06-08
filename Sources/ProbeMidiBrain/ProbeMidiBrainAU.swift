@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import CoreMIDI
 import os
 import ProbeKit
 
@@ -35,6 +36,10 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
 
     private struct ControlState {
         var controller: BrainController?
+        // Host-diagnostics channel (reporter assembles + streamer ships over
+        // /diagnostics). Created with render resources and torn down with them,
+        // alongside the BrainController.
+        var diagnostics: DiagnosticsChannel?
     }
 
     /// Key under which the program is stored inside `fullState`.
@@ -68,6 +73,20 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         ["ProbeMidiBrain"]
     }
 
+    // MARK: - MIDI protocol negotiation
+
+    /// Advertise that this AU is happy to receive MIDI 2.0. The host reads this
+    /// before allocating render resources; if it (AUM) supports MIDI 2.0 it then
+    /// delivers inbound events as `AURenderEventMIDIEventList` (UMP) in this
+    /// protocol, otherwise it falls back to legacy `AURenderEventMIDI`. The render
+    /// block records which path/protocol AUM actually used (see BrainEngine's
+    /// `observeUMP`), and the negotiated `hostMIDIProtocol`/`audioUnitMIDIProtocol`
+    /// pair is captured off-thread by the diagnostics collector — together they
+    /// reveal whether AUM is driving the node with MIDI 1.0 or 2.0.
+    public override var audioUnitMIDIProtocol: MIDIProtocolID {
+        ._2_0
+    }
+
     // MARK: - Program (authoring API for the view model)
 
     /// Replace the program and republish it to the realtime engine.
@@ -89,31 +108,22 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
 
     // MARK: - Host introspection (control-surface analysis)
 
-    /// Assemble a full host-introspection snapshot: the sanctioned readback the
-    /// render thread captured (transport + musical context + render config),
-    /// merged with the backdoor surfaces (AVAudioSession + CoreMIDI) read here off
-    /// the render thread. Logs it under `com.teemow.auv3probe` (so it streams to
-    /// idevicesyslog) and returns it for the on-device panel.
-    public func captureIntrospection() -> HostIntrospection {
-        let host = engine.hostSnapshot()
-        var snapshot = HostIntrospection()
-        snapshot.transport = host.transport
-        snapshot.musicalContext = host.musicalContext
-        snapshot.audioSession = HostIntrospectionCollector.audioSession()
-        snapshot.coreMIDI = HostIntrospectionCollector.coreMIDI()
+    /// The most recent host-diagnostics snapshot assembled by the view-independent
+    /// `HostDiagnosticsReporter` (started with render resources). The UI reads this
+    /// passively — capture is owned by the reporter, not the panel — so it is nil
+    /// until render resources are allocated and the reporter has ticked once.
+    public var latestDiagnostics: HostIntrospection? {
+        control.withLock { $0.diagnostics?.latest }
+    }
 
-        var render = HostIntrospection.Render()
-        render.maximumFramesToRender = Int(maximumFramesToRender)
-        render.midiOutputNames = midiOutputNames
-        render.outputBusFormats = (0..<outputBusses.count).map { index in
-            let format = outputBusses[index].format
-            return "\(Int(format.sampleRate))Hz ch\(format.channelCount)"
-        }
-        snapshot.render = render
-
-        snapshot.log()
-        observedSummary.log()
-        return snapshot
+    /// Force an immediate diagnostics capture for the panel's on-demand "dump"
+    /// button. Routed through the reporter so the assembled snapshot also reaches
+    /// the os_log fallback and any connected `/diagnostics` stream. Returns the
+    /// fresh snapshot, or nil when the reporter is not running (render resources
+    /// not yet allocated).
+    @discardableResult
+    public func captureIntrospection() -> HostIntrospection? {
+        control.withLock { $0.diagnostics?.capture() }
     }
 
     /// The accumulated observed-MIDI tally (drained from the render thread's ring
@@ -158,6 +168,20 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
             let controller = BrainController(ring: engine.commandRing)
             state.controller = controller
             controller.start()
+
+            // Always-on diagnostics: assemble the host snapshot (reading the
+            // engine's published render-thread readback) and stream it to the
+            // daemon, independent of whether the plugin UI is open. BrainEngine
+            // captures only transport + musical context on the render thread (no
+            // render `AudioTimeStamp`), so `renderTime` stays unavailable here —
+            // that field is populated by ProbeAudioTap, which reads it.
+            let diagnostics = DiagnosticsChannel(source: "ProbeMidiBrain", audioUnit: self) { [engine] in
+                let host = engine.hostSnapshot()
+                return HostRenderSnapshot(transport: host.transport,
+                                          musicalContext: host.musicalContext)
+            }
+            state.diagnostics = diagnostics
+            diagnostics.start()
         }
     }
 
@@ -165,6 +189,8 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         control.withLock { state in
             state.controller?.stop()
             state.controller = nil
+            state.diagnostics?.stop()
+            state.diagnostics = nil
         }
         engine.midiOut = nil
         engine.musicalContext = nil

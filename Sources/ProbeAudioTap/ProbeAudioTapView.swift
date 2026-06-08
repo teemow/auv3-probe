@@ -42,14 +42,14 @@ public struct ProbeAudioTapView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 8) {
                 header
                 DaemonStatusView()
                 meterPanel
                 targetPanel
                 streamPanel
             }
-            .padding(16)
+            .padding(10)
         }
         .background(Signalwave.bg.ignoresSafeArea())
         .tint(Signalwave.green)
@@ -57,11 +57,11 @@ public struct ProbeAudioTapView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            WaveGlyph().frame(width: 32, height: 20)
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 8) {
+            WaveGlyph().frame(width: 24, height: 15)
+            VStack(alignment: .leading, spacing: 1) {
                 Text("probe audio tap")
-                    .font(Signalwave.mono(.headline, weight: .bold))
+                    .font(Signalwave.mono(.subheadline, weight: .bold))
                     .foregroundStyle(Signalwave.fg)
                 Text("// aufx · ears on the lan")
                     .font(Signalwave.mono(.caption2))
@@ -74,25 +74,25 @@ public struct ProbeAudioTapView: View {
     // MARK: - Meter
 
     private var meterPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             SectionHeader("level")
             meterBar(label: "peak", value: model.peak)
             meterBar(label: "rms", value: model.rms)
         }
-        .padding(12)
+        .padding(8)
         .signalField()
     }
 
     private func meterBar(label: String, value: Float) -> some View {
         let clamped = CGFloat(max(0, min(1, value)))
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(label)
-                    .font(Signalwave.mono(.caption))
+                    .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
                 Spacer()
                 Text(String(format: "%.3f", value))
-                    .font(Signalwave.mono(.caption))
+                    .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.fg)
             }
             GeometryReader { geo in
@@ -104,14 +104,14 @@ public struct ProbeAudioTapView: View {
                         .frame(width: geo.size.width * clamped)
                 }
             }
-            .frame(height: 8)
+            .frame(height: 6)
         }
     }
 
     // MARK: - Target
 
     private var targetPanel: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             SectionHeader("stream options")
             Text("// streams to the auto-discovered daemon")
                 .font(Signalwave.mono(.caption2))
@@ -120,14 +120,14 @@ public struct ProbeAudioTapView: View {
                 .font(Signalwave.mono(.caption2))
                 .foregroundStyle(Signalwave.dim)
         }
-        .padding(12)
+        .padding(8)
         .signalField()
     }
 
     // MARK: - Stream control
 
     private var streamPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             SectionHeader("stream")
             Button {
                 model.config.streaming.toggle()
@@ -137,7 +137,7 @@ public struct ProbeAudioTapView: View {
             }
             .buttonStyle(.signalPrimary)
         }
-        .padding(12)
+        .padding(8)
         .signalField()
     }
 }

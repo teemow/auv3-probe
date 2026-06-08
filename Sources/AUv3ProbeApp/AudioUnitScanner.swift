@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import UIKit
 import ProbeKit
 
 // AudioUnitScanner enumerates the AUv3 audio units installed on the device and,
@@ -24,6 +25,10 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
     let tags: [String]
     let version: String
     let componentDescription: AudioComponentDescription
+    /// The plugin's icon (the containing-app icon for app-extension AUs),
+    /// captured at discovery so the list shows it by default and the probe can
+    /// archive it into the dump. nil when no icon is available.
+    let icon: UIImage?
 
     init(component: AVAudioUnitComponent) {
         let desc = component.audioComponentDescription
@@ -34,6 +39,7 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
         self.typeName = component.typeName
         self.tags = component.allTagNames
         self.version = component.versionString
+        self.icon = ComponentIcon.image(for: desc)
         // type/subtype/manufacturer FourCCs uniquely identify a component.
         self.id = "\(FourCharCode.string(from: desc.componentType))"
             + "/\(FourCharCode.string(from: desc.componentSubType))"
@@ -71,12 +77,17 @@ enum AudioUnitError: LocalizedError {
 }
 
 enum AudioUnitScanner {
-    /// The component types we read: instruments (`aumu`), effects (`aufx`) and
-    /// music effects (`aumf`).
+    /// The component types we read: instruments (`aumu`), effects (`aufx`),
+    /// music effects (`aumf`) and MIDI processors (`aumi`). MIDI processors (the
+    /// AUM "MIDI" plugin category, e.g. PatternBud, arpeggiators, our own
+    /// ProbeMidiBrain) have no audio I/O but do expose an AUParameterTree and a
+    /// saved fullState, so they are probeable and authorable exactly like the
+    /// rest — reading is instance-independent and needs no audio engine.
     static let scannedTypes: [OSType] = [
-        kAudioUnitType_MusicDevice,   // aumu
-        kAudioUnitType_Effect,        // aufx
-        kAudioUnitType_MusicEffect,   // aumf
+        kAudioUnitType_MusicDevice,    // aumu
+        kAudioUnitType_Effect,         // aufx
+        kAudioUnitType_MusicEffect,    // aumf
+        kAudioUnitType_MIDIProcessor,  // aumi
     ]
 
     /// Enumerate installed AUv3s of the scanned types, sorted by name.
@@ -127,6 +138,10 @@ enum AudioUnitScanner {
         let latency = auUnit.latency
         let tailTime = auUnit.tailTime
 
+        // Archive the icon captured at discovery, the way AUM stores it, so the
+        // daemon can graft it verbatim into an authored node.
+        let icon = unit.icon.flatMap(ComponentIcon.archived)
+
         return AudioUnitDetails(
             component: component,
             name: unit.name,
@@ -137,7 +152,8 @@ enum AudioUnitScanner {
             channelCapabilities: channelCaps.isEmpty ? nil : channelCaps,
             latency: latency > 0 ? latency : nil,
             tailTime: tailTime > 0 ? tailTime : nil,
-            supportsUserPresets: auUnit.supportsUserPresets ? true : nil
+            supportsUserPresets: auUnit.supportsUserPresets ? true : nil,
+            componentIcon: icon
         )
     }
 

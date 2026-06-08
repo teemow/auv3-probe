@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import CoreMIDI
 import os
 import Atomics
 import ProbeKit
@@ -189,8 +190,21 @@ final class BrainEngine: @unchecked Sendable {
                 var event = inputs.events
                 while let raw = event {
                     let head = raw.pointee.head
-                    if head.eventType == .MIDI {
+                    switch head.eventType {
+                    case .MIDI:
+                        // Legacy MIDI 1.0: observe + run the footswitch matcher.
                         self.handleMIDI(raw.pointee.MIDI, program: &prog, at: inputs.sampleTime)
+                    case .midiEventList:
+                        // MIDI-2.0-capable UMP path (observe only — footswitches
+                        // are matched on the legacy channel-voice path).
+                        self.observeUMP(raw, at: inputs.sampleTime)
+                    case .parameter, .parameterRamp:
+                        // Host parameter automation driving this AU.
+                        self.observeParameter(raw.pointee.parameter,
+                                               ramp: head.eventType == .parameterRamp,
+                                               at: inputs.sampleTime)
+                    default:
+                        break
                     }
                     event = UnsafePointer(head.next)
                 }
@@ -205,8 +219,17 @@ final class BrainEngine: @unchecked Sendable {
                 var event = inputs.events
                 while let raw = event {
                     let head = raw.pointee.head
-                    if head.eventType == .MIDI {
+                    switch head.eventType {
+                    case .MIDI:
                         self.observe(raw.pointee.MIDI, at: inputs.sampleTime)
+                    case .midiEventList:
+                        self.observeUMP(raw, at: inputs.sampleTime)
+                    case .parameter, .parameterRamp:
+                        self.observeParameter(raw.pointee.parameter,
+                                               ramp: head.eventType == .parameterRamp,
+                                               at: inputs.sampleTime)
+                    default:
+                        break
                     }
                     event = UnsafePointer(head.next)
                 }
@@ -273,6 +296,50 @@ final class BrainEngine: @unchecked Sendable {
             length: midi.length,
             cable: midi.cable,
             byte0: data.0, byte1: data.1, byte2: data.2
+        ))
+    }
+
+    /// Record every packet of an inbound UMP event list (the MIDI-2.0-capable
+    /// path AUM uses once we advertise `audioUnitMIDIProtocol`). We read the list
+    /// through raw pointers (the `MIDIEventList` is a flexible-array struct, so it
+    /// must never be copied by value) and walk packets via the CoreMIDI overlay's
+    /// `unsafeSequence()` — both wait-free and allocation-free, safe on the render
+    /// thread. Only the first two 32-bit words of each packet are kept; that is
+    /// enough to classify message type, group, channel, and status.
+    private func observeUMP(_ raw: UnsafePointer<AURenderEvent>, at sampleTime: Double) {
+        let rawBytes = UnsafeRawPointer(raw)
+        let cable = rawBytes.assumingMemoryBound(to: AUMIDIEventList.self).pointee.cable
+        let listPtr = rawBytes
+            .advanced(by: MemoryLayout<AUMIDIEventList>.offset(of: \.eventList)!)
+            .assumingMemoryBound(to: MIDIEventList.self)
+        let protocolID = UInt8(truncatingIfNeeded: listPtr.pointee.`protocol`.rawValue)
+        let wordsOffset = MemoryLayout<MIDIEventPacket>.offset(of: \.words)!
+        for packet in listPtr.unsafeSequence() {
+            let wordCount = Int(packet.pointee.wordCount)
+            guard wordCount >= 1 else { continue }
+            let words = UnsafeRawPointer(packet)
+                .advanced(by: wordsOffset)
+                .assumingMemoryBound(to: UInt32.self)
+            observedRing.push(ObservedMidiEvent(
+                ump: words[0],
+                word1: wordCount >= 2 ? words[1] : 0,
+                wordCount: UInt16(truncatingIfNeeded: wordCount),
+                protocolID: protocolID,
+                cable: cable,
+                sampleTime: sampleTime
+            ))
+        }
+    }
+
+    /// Record one inbound parameter-automation event (the host driving this AU's
+    /// parameters). `AUParameterEvent` is a fixed-size struct, so a value copy is
+    /// safe; the push is wait-free and allocation-free.
+    private func observeParameter(_ event: AUParameterEvent, ramp: Bool, at sampleTime: Double) {
+        observedRing.push(ObservedMidiEvent(
+            parameterAddress: event.parameterAddress,
+            value: event.value,
+            ramp: ramp,
+            sampleTime: sampleTime
         ))
     }
 

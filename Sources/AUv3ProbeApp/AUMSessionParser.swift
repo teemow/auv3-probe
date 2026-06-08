@@ -353,14 +353,14 @@ struct AUMArchive {
 
         // (a) nested specState dict (version 13 / .aum_midimap).
         if let ss = dict(m["specState"]) {
-            return makeLeaf(collection: collection, target: target,
+            return makeLeaf(collection: collection, target: target, specState: true,
                             type: intOr(ss["type"], 0), data1: intOr(ss["data1"], 0),
                             channel: intOr(m["channel"], 0), enabled: bool(ss["enabled"]),
                             min: minV, max: maxV, autoToggle: autoToggle)
         }
         // (b) flat-dotted specState keys.
         if m["specState.enabled"] != nil {
-            return makeLeaf(collection: collection, target: target,
+            return makeLeaf(collection: collection, target: target, specState: true,
                             type: intOr(m["specState.type"], 0), data1: intOr(m["specState.data1"], 0),
                             channel: intOr(m["channel"], 0), enabled: bool(m["specState.enabled"]),
                             min: minV, max: maxV, autoToggle: autoToggle)
@@ -368,18 +368,20 @@ struct AUMArchive {
         // (c) packed spec int (version 8 / 10).
         if let raw = m["spec"] {
             let spec = decodePacked(intOr(raw, 0))
-            return makeLeaf(collection: collection, target: target,
+            return makeLeaf(collection: collection, target: target, specState: false,
                             type: spec.type, data1: spec.data1, channel: spec.channel, enabled: spec.enabled,
                             min: minV, max: maxV, autoToggle: autoToggle)
         }
         return nil
     }
 
-    private func makeLeaf(collection: String, target: String, type: Int, data1: Int, channel: Int,
-                          enabled: Bool, min: Double, max: Double, autoToggle: Bool) -> MappingInfo? {
+    private func makeLeaf(collection: String, target: String, specState: Bool, type: Int, data1: Int,
+                          channel: Int, enabled: Bool, min: Double, max: Double, autoToggle: Bool) -> MappingInfo? {
         guard enabled else { return nil }
-        return MappingInfo(collection: collection, target: target, type: type, data1: data1,
-                           channel: channel, min: min, max: max, autoToggle: autoToggle, enabled: enabled)
+        let typeName = MappingInfo.typeLabel(specState: specState, type: type, data1: data1)
+        return MappingInfo(collection: collection, target: target, type: type, typeName: typeName,
+                           data1: data1, channel: channel, min: min, max: max,
+                           autoToggle: autoToggle, enabled: enabled)
     }
 
     /// Split a packed `spec` int (version 8 / 10) into type/data1/channel and

@@ -13,14 +13,12 @@ final class BrainViewModel: ObservableObject {
     @Published var status: BrainStatus
     /// Rolling tally of every inbound MIDI event AUM routes into the node.
     @Published var observed = ObservedMidiSummary()
-    /// The latest assembled host-introspection snapshot (refreshed periodically
-    /// and on demand). Logged to os_log each time it is captured.
+    /// The latest host-diagnostics snapshot, mirrored passively from the AU's
+    /// view-independent `HostDiagnosticsReporter`. The panel no longer drives
+    /// capture (which used to die whenever the UI closed) — it just reflects the
+    /// reporter's `latest` on each poll tick.
     @Published var introspection: HostIntrospection?
     private var timer: Timer?
-    /// Capture + log a full introspection snapshot every Nth poll tick (~3s at
-    /// 0.1s ticks) so idevicesyslog gets a steady stream during analysis.
-    private var tick = 0
-    private static let introspectionEveryTicks = 30
 
     init(audioUnit: ProbeMidiBrainAU) {
         self.audioUnit = audioUnit
@@ -30,7 +28,7 @@ final class BrainViewModel: ObservableObject {
             guard let self = self else { return }
             Task { @MainActor in self.poll() }
         }
-        captureIntrospection()
+        poll()
     }
 
     deinit { timer?.invalidate() }
@@ -38,16 +36,15 @@ final class BrainViewModel: ObservableObject {
     private func poll() {
         status = audioUnit.status
         observed = audioUnit.pollObservedMIDI()
-        tick += 1
-        if tick % Self.introspectionEveryTicks == 0 {
-            captureIntrospection()
-        }
+        introspection = audioUnit.latestDiagnostics
     }
 
-    /// Capture + log a fresh host-introspection snapshot (also fired by the UI's
-    /// "dump" button for an on-demand os_log entry).
+    /// Fire the reporter's on-demand capture (the UI's "dump" button) and mirror
+    /// the fresh snapshot. A no-op for the view if the reporter is not yet running.
     func captureIntrospection() {
-        introspection = audioUnit.captureIntrospection()
+        if let snapshot = audioUnit.captureIntrospection() {
+            introspection = snapshot
+        }
     }
 
     /// Reset the observed-MIDI tally (e.g. before a fresh experiment).
@@ -275,11 +272,19 @@ public struct ProbeMidiBrainView: View {
                 SignalChip(text: "clock: \(observed.clock)", color: observed.clock > 0 ? Signalwave.green : Signalwave.dim)
                 SignalChip(text: "start/stop/cont: \(observed.start)/\(observed.stop)/\(observed.continue)")
                 SignalChip(text: "sysex: \(observed.sysex)", color: observed.sysex > 0 ? Signalwave.amber : Signalwave.dim)
+                SignalChip(text: "ump: \(observed.ump)", color: observed.ump > 0 ? Signalwave.green : Signalwave.dim)
+                SignalChip(text: "param: \(observed.parameter)/\(observed.parameterRamp)", color: (observed.parameter + observed.parameterRamp) > 0 ? Signalwave.amber : Signalwave.dim)
                 SignalChip(text: "other: \(observed.other)")
             }
             HStack(spacing: 8) {
                 chip("channels: \(observed.channels.isEmpty ? "-" : observed.channels.map(String.init).joined(separator: ","))")
                 chip("last: \(observed.lastMessage.isEmpty ? "-" : observed.lastMessage)")
+            }
+            if observed.ump > 0 {
+                HStack(spacing: 8) {
+                    chip("ump mt: \(observed.umpMessageTypes.isEmpty ? "-" : observed.umpMessageTypes.map(String.init).joined(separator: ","))")
+                    chip("ump proto: \(observed.umpProtocols.isEmpty ? "-" : observed.umpProtocols.joined(separator: ","))")
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -196,6 +196,7 @@ struct AudioUnitsView: View {
                 Task { await model.inspect(unit) }
             } label: {
                 HStack(alignment: .top, spacing: 8) {
+                    icon(unit)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(unit.name)
                             .font(Signalwave.mono(.body))
@@ -246,6 +247,31 @@ struct AudioUnitsView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.toggle(unit.id) }
         }
+    }
+
+    @ViewBuilder
+    private func icon(_ unit: DiscoveredAudioUnit) -> some View {
+        Group {
+            if let image = unit.icon {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+            } else {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Signalwave.surface)
+                    .overlay(
+                        Image(systemName: "waveform")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Signalwave.dim)
+                    )
+            }
+        }
+        .frame(width: 34, height: 34)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Signalwave.grid, lineWidth: 1)
+        )
     }
 
     private func subtitle(_ unit: DiscoveredAudioUnit) -> String {

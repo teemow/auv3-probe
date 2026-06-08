@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import os
 import Atomics
 import ProbeKit
 
@@ -33,6 +34,20 @@ final class TapDSP: @unchecked Sendable {
     let peakBits = ManagedAtomic<UInt32>(0)
     let rmsBits = ManagedAtomic<UInt32>(0)
 
+    // Host-provided realtime blocks, cached at allocateRenderResources time (off
+    // the realtime thread). Even though the tap is "just" an audio effect, the
+    // host still hands it the transport + musical-context blocks; reading them on
+    // the render thread lets the diagnostics reporter see what AUM tells the tap
+    // about song position/tempo (the same sanctioned surface BrainEngine reads).
+    var transportState: AUHostTransportStateBlock?
+    var musicalContext: AUHostMusicalContextBlock?
+
+    // Latest sanctioned host readback (transport + musical context + render
+    // timestamp), captured on the render thread and read off it by the
+    // diagnostics reporter. Written via a non-blocking try-lock so the render
+    // thread never blocks on the reporter's read.
+    private let hostState = OSAllocatedUnfairLock(initialState: HostRenderSnapshot())
+
     // Render-thread-only scratch holding one render block's interleaved samples.
     private var scratch: UnsafeMutableBufferPointer<Float>?
 
@@ -59,11 +74,23 @@ final class TapDSP: @unchecked Sendable {
          Float(bitPattern: rmsBits.load(ordering: .relaxed)))
     }
 
+    /// The latest sanctioned host readback, for the diagnostics reporter. Read
+    /// off the render thread (the reporter's background queue); the render thread
+    /// writes it via a non-blocking try-lock.
+    func renderSnapshot() -> HostRenderSnapshot {
+        hostState.withLock { $0 }
+    }
+
     func makeRenderBlock() -> AUInternalRenderBlock {
         return { [self]
             actionFlags, timestamp, frameCount, outputBusNumber, outputData, eventListHead, pullInputBlock in
             _ = outputBusNumber
             _ = eventListHead
+
+            // Capture the sanctioned host readback every cycle, independent of the
+            // audio passthrough below — diagnostics must keep flowing even when the
+            // tap isn't streaming audio or the host hasn't connected an input.
+            self.captureHostState(timestamp)
 
             guard let pull = pullInputBlock else {
                 return kAudioUnitErr_NoConnection
@@ -75,6 +102,60 @@ final class TapDSP: @unchecked Sendable {
             self.tap(outputData, frameCount: Int(frameCount))
             return noErr
         }
+    }
+
+    /// Read the host blocks + render timestamp once per cycle and publish the
+    /// sanctioned readback for the diagnostics reporter. Realtime-safe: all reads
+    /// fill stack value types and the publish uses a non-blocking try-lock, so the
+    /// render thread never allocates or blocks (mirrors BrainEngine.captureHostState).
+    private func captureHostState(_ timestamp: UnsafePointer<AudioTimeStamp>) {
+        var transport = HostDiagnostics.Transport()
+        if let transportState = transportState {
+            var flags = AUHostTransportStateFlags(rawValue: 0)
+            var samplePosition: Double = 0
+            var cycleStart: Double = 0
+            var cycleEnd: Double = 0
+            if transportState(&flags, &samplePosition, &cycleStart, &cycleEnd) {
+                transport.available = true
+                transport.moving = flags.contains(.moving)
+                transport.recording = flags.contains(.recording)
+                transport.cycling = flags.contains(.cycling)
+                transport.samplePosition = samplePosition
+                transport.cycleStartBeat = cycleStart
+                transport.cycleEndBeat = cycleEnd
+            }
+        }
+
+        var context = HostDiagnostics.MusicalContext()
+        if let musicalContext = musicalContext {
+            var tempo: Double = 0
+            var tsNumerator: Double = 0
+            var tsDenominator: Int = 0
+            var beat: Double = 0
+            var sampleOffset: Int = 0
+            var downbeat: Double = 0
+            if musicalContext(&tempo, &tsNumerator, &tsDenominator, &beat, &sampleOffset, &downbeat) {
+                context.available = true
+                context.tempo = tempo
+                context.timeSignatureNumerator = tsNumerator
+                context.timeSignatureDenominator = tsDenominator
+                context.currentBeatPosition = beat
+                context.sampleOffsetToNextBeat = sampleOffset
+                context.currentMeasureDownbeatPosition = downbeat
+            }
+        }
+
+        let stamp = timestamp.pointee
+        var renderTime = HostDiagnostics.RenderTimestamp()
+        renderTime.available = true
+        if stamp.mFlags.contains(.sampleTimeValid) { renderTime.sampleTime = stamp.mSampleTime }
+        if stamp.mFlags.contains(.hostTimeValid) { renderTime.hostTime = stamp.mHostTime }
+        if stamp.mFlags.contains(.rateScalarValid) { renderTime.rateScalar = stamp.mRateScalar }
+
+        let snapshot = HostRenderSnapshot(transport: transport,
+                                          musicalContext: context,
+                                          renderTime: renderTime)
+        hostState.withLockIfAvailable { $0 = snapshot }
     }
 
     /// Compute features + push interleaved native-rate samples. Realtime-safe.

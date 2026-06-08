@@ -1,0 +1,232 @@
+{
+  "_comment": "Decoded assigned MIDI-Control mappings from captureprobe_2.aumproj (AUM session schema v13). A probe session that hand-maps targets to reverse-engineer AUM's on-disk midiCtrlState format. type: 0=CC, 1=NOTE, 2=PC, 3=PBEND(data1=0)/CHPRS(data1=1). channel is 0-indexed (0 = MIDI ch1). min/max normalised 0..1; invert = min>max. autoToggle = the Cycle flag. Node slot<S> is a raw storage index (source/output/effects in creation order), NOT visible-effect order. PresetLoadCtrl/<idx>:<presetNumber>:<name>: middle field is the AU preset's own number, not the MIDI program (the firing program is data1). Session Load is intentionally absent (AUM persists it globally, not in the file).",
+  "source_file": "captureprobe_2.aumproj",
+  "mapping_count": 25,
+  "mappings": [
+    {
+      "target": "midiCtrlState/Channels/chan0/Channel controls/Mute",
+      "type": 0,
+      "data1": 9,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/Channel controls/Rec enable",
+      "type": 0,
+      "data1": 11,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/Channel controls/ScrollToChannel",
+      "type": 0,
+      "data1": 12,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/Channel controls/Solo",
+      "type": 0,
+      "data1": 10,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/Channel controls/Volume",
+      "type": 0,
+      "data1": 7,
+      "channel": 0,
+      "min": 0.0,
+      "max": 0.7071067690849304,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/slot0/0",
+      "type": 0,
+      "data1": 30,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/slot0/_AUMNode:Bypass",
+      "type": 0,
+      "data1": 20,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/slot0/_AUMNode:FrontPlugin",
+      "type": 0,
+      "data1": 21,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/slot0/_AUMNode:PresetLoadCtrl/0:1:Abandoned_Themepark",
+      "type": 2,
+      "data1": 1,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/slot0/_AUMNode:PresetLoadCtrl/1:1:Damage_Bass",
+      "type": 2,
+      "data1": 2,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Channels/chan0/slot0/_AUMNode:TogglePlugin",
+      "type": 0,
+      "data1": 22,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/System/_AUM:HideAllPlugins",
+      "type": 0,
+      "data1": 116,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/System/_AUM:ShowSelf",
+      "type": 0,
+      "data1": 115,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/System/_AUM:UnSoloAll",
+      "type": 0,
+      "data1": 117,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Metronome on/off",
+      "type": 3,
+      "data1": 0,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": true
+    },
+    {
+      "target": "midiCtrlState/Transport/Next bar",
+      "type": 0,
+      "data1": 111,
+      "channel": 0,
+      "min": 1.0,
+      "max": 0.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Previous bar",
+      "type": 0,
+      "data1": 110,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Rewind",
+      "type": 0,
+      "data1": 105,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Start Play",
+      "type": 0,
+      "data1": 104,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Stop/Rewind",
+      "type": 0,
+      "data1": 103,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Tap Tempo",
+      "type": 0,
+      "data1": 108,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Tempo",
+      "type": 3,
+      "data1": 1,
+      "channel": 0,
+      "min": 0.3529411852359772,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Tempo Presets/0:100",
+      "type": 0,
+      "data1": 114,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": false
+    },
+    {
+      "target": "midiCtrlState/Transport/Toggle Play",
+      "type": 0,
+      "data1": 102,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": true
+    },
+    {
+      "target": "midiCtrlState/Transport/Toggle Record",
+      "type": 1,
+      "data1": 60,
+      "channel": 0,
+      "min": 0.0,
+      "max": 1.0,
+      "autoToggle": true
+    }
+  ]
+}

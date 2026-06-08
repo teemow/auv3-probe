@@ -84,7 +84,63 @@ two repos.
   and adds `SpecTypeName` so inspection/diff output never presents a guessed
   code as fact.
 
+**Confirmed by capture (probe session, 2026-06-05) — ready to pin:**
+
+A purpose-built probe session (one of every target/type/flag) was authored in
+AUM, uploaded, and decoded from the raw `.aumproj` (`midiCtrlState`). The capture
+artifacts are committed: [`captureprobe.aumproj`](captureprobe.aumproj) (raw) and
+[`captureprobe-midi-control.json`](captureprobe-midi-control.json) (decoded 25
+mappings). See [aum-control-surface.md](aum-control-surface.md) → *Decoded
+`.aumproj` MIDI-Control format* for the full schema and the **live closed-loop
+verification**. Net results:
+
+- **Type codes confirmed**: `CC=0`, `NOTE=1`, `PC=2` (the old guess is correct),
+  and `PBEND`/`CHPRS` both `type=3`, disambiguated by `data1` (PBEND `data1=0`,
+  CHPRS `data1=1`). PC-based preset/session-load *authoring* is now unblocked.
+- **Transport key strings confirmed**: `Transport/{Previous bar, Next bar,
+  Metronome on/off, Tempo, Tempo Presets/<idx>:<bpm>}` (plus the already-known
+  Toggle Play / Start / Stop-Rewind / Rewind / Toggle Record / Tap Tempo).
+- **Node-action key strings confirmed**: `_AUMNode:Bypass` (per slot — incl. the
+  HW-output node), `_AUMNode:FrontPlugin` (Show & Front),
+  `_AUMNode:TogglePlugin` (Show / Hide),
+  `_AUMNode:PresetLoadCtrl/<idx>:<presetNumber>:<name>` (middle field is the AU
+  preset's own number, **not** the MIDI program; the firing program is `data1`).
+- **`slot<S>` = raw storage index, not visible-effect order** (source `slot0`,
+  HW-output `slot1`, first inserted effect `slot2`); resolve nodes by component
+  identity, never assume `slot0` = first effect.
+- **System + channel key strings confirmed**: `System/_AUM:{ShowSelf,
+  HideAllPlugins,UnSoloAll}`; `Channels/chan<N>/Channel controls/ScrollToChannel`
+  (present on **MIDI** strips too, as the only Channel control they expose).
+- **Flag/attribute encoding confirmed**: Cycle = `autoToggle`, Invert = swapped
+  `min`/`max`, Range = normalised `min`/`max`, OFF = `specState.enabled=false`,
+  channel 0-indexed.
+- **Negative results confirmed**: Session Load is **absent** from the file (global
+  storage) → needs the daemon-owned PC→session registry, not file authoring. AUM
+  also auto-creates a disabled control per writable param (CC-budget evidence).
+
+**Done (mcp-midi-controller) — golden full-control banking:**
+
+- **Multi-node CC collision RESOLVED.** The single-channel `Convention`
+  (one CC per node param, restarting per node on one channel) collided on
+  multi-node sessions: two nodes' params shared a CC, so one message drove
+  several. `internal/aum/instrument.go` adds a **banking allocator**
+  (`Session.Instrument`) that assigns every mappable target collision-free,
+  spreading across MIDI channels (CC 0..127 then Note 0..127 per channel) in
+  priority order — global+mixer on the convention channel, then node reserved
+  triggers, instrument (`aumu`) params, effect (`aufx`/`aumf`) params from ch 2
+  up. Overflow past ch 16 is reported, not fatal; `preserve_existing` makes
+  re-instrumenting safe and idempotent. The mixer/transport convention CCs stay
+  on the `device.Convention*` band so the session-derived `MixerDeviceType` still
+  resolves. Exposed as the `instrument_aum_session` MCP tool, `full_control:true`
+  on `author_aum_session`, and `author_probe_session`. Full design:
+  [golden-session.md](golden-session.md).
+
 **Done (auv3-probe):**
+
+- **Committed golden example** — [`docs/examples/golden-example.aumproj`](examples/golden-example.aumproj)
+  + decoded [`golden-example-midi-control.json`](examples/golden-example-midi-control.json):
+  a clean brain + iSEM + delay + tap + master rig, instrumented full-control (51
+  mappings, 2 channels, no overflow), as the reusable full-control reference.
 
 - **Standard brain scene-change encoding** (Pillar 3.2). `SongStructure.swift`
   adds `BrainControlConvention` (the explicit channel allocation shared with the
@@ -94,23 +150,41 @@ two repos.
   what the daemon authors/sends. *Not compiled here* (no Swift toolchain on
   Linux; the AU targets need Apple frameworks) — review-only.
 
-**Still gated (need a live AUM capture or an on-device run):**
+**Resolved by the 2026-06-05 capture (was gated, now confirmed — pin in code):**
 
-- **PC / Pitch-Bend / Channel-Pressure type codes unconfirmed** — codes are
-  named but must be confirmed by capturing one *enabled* mapping of each from
-  real AUM, then pinned. Blocks PC-based preset/session-load *authoring*.
-- **Extended transport targets** (Previous/Next bar, Tempo value, Metronome,
-  Tempo Presets) — their on-disk `midiCtrlState` key strings are not
-  corpus-verified, so `buildTransport`/`conventionTransportCC` intentionally
-  omit them rather than author junk keys.
+- **PC / Pitch-Bend / Channel-Pressure type codes** — confirmed (`PC=2`,
+  `PBEND=3/data1=0`, `CHPRS=3/data1=1`). Pin in `spec.go` and enable PC encode.
+- **Extended transport targets** (Previous/Next bar, Tempo, Metronome, Tempo
+  Presets) — key strings confirmed; safe to add to
+  `buildTransport`/`conventionTransportCC`.
+- **Node bypass / Show-Front / Show-Hide / Preset Load / System actions /
+  Scroll-to-channel** — key strings confirmed; can be modeled in the convention.
+- **Cycle / Invert / Range attributes** — encoding confirmed (`autoToggle`,
+  swapped `min`/`max`, normalised `min`/`max`); extend the `midiCtrlState`
+  parser + `SessionMap` to surface and author them (the flat `get_aum_session`
+  view currently drops them).
+
+**Still gated:**
+
 - **Pan / sends** — defined in the convention but require a Stereo Balance / Bus
   Send node (and that node's component identity) to physically exist; not
   auto-authored.
-- **Global Session Load actions + `.aum_aupreset`** — AUM persists these
-  outside `.aumproj`; needs a separate capture to model.
+- **Global Session Load** — *cross-session load now confirmed working*
+  (2026-06-05): `pc 10, ch1` through the brain swapped `captureprobe` →
+  `captureprobe_2` (tap re-instantiated on a new port; note 60 went C5/iSEM →
+  C4/Continua), and the brain auto-reconnected across the swap. The
+  daemon-owned PC→session registry model is validated. Still to formalize:
+  authoring/recording that registry daemon-side (the actions live outside
+  `.aumproj`). `.aum_aupreset` (user-preset container) remains unmodeled.
+- **OMNI channel sentinel** — the on-disk value for OMNI is unconfirmed (the
+  probe used ch1 only); capture one OMNI mapping to pin it.
 - **First-class Device auto-derivation** (the PDR refactor) — larger, deferred.
-- **End-to-end verification** — every milestone is confirmable only on the live
-  rig (hands → brain → AUM → ears).
+- **End-to-end verification** — *loops confirmed* (2026-06-05): (a) a PC →
+  `MIDI Control` loaded a mapped iSEM **preset**, measured audibly at the tap
+  (centroid 2788→1487 Hz, HNR 22→0 dB); (b) a PC triggered a **cross-session
+  load** (`captureprobe` → `captureprobe_2`), with the brain auto-reconnecting
+  across the swap. Remaining targets (transport, mixer CCs, daemon `recall_scene`
+  → brain) still confirmable only on the live rig.
 
 ## Pillar 1 — Deep session understanding (mcp-midi-controller)
 
@@ -119,10 +193,11 @@ author the full surface. All in `internal/aum` unless noted.
 
 | Gap | Task | Notes / blocker |
 |---|---|---|
-| **PC / Pitch-Bend / Channel-Pressure `type` codes unconfirmed** (`TypeProgramChange = 2` is a guess) | Capture one *enabled* PC mapping from real AUM, decode it, pin the type codes in `spec.go`; add encode support | **Blocker**: needs a live AUM sample. Capturable now with this rig (map a PC in AUM → upload session → decode). Do this first; it unblocks preset/session-load authoring. |
-| **Global Session Load actions invisible** (AUM stores them globally, not in `.aumproj`) | Decide the model: treat cross-session "scene = load `.aumproj` by PC" as a daemon-owned registry (PC# → session id) the daemon authors into AUM's global action set, and record it daemon-side since the file can't | Needs to confirm where/how AUM persists the global set; may require a separate capture. Document as a named limitation if not file-addressable. |
+| **PC / Pitch-Bend / Channel-Pressure `type` codes** | **CONFIRMED (2026-06-05 capture)**: `PC=2`, `PBEND=3/data1=0`, `CHPRS=3/data1=1`. Pin in `spec.go`; add PC encode support | **Unblocked.** Decoded from a probe `.aumproj`. Enables preset/session-load authoring. |
+| **Cycle / Invert / Range attributes dropped by the parser** | Extend the `midiCtrlState` parse + `SessionMap` to read/author `autoToggle` (Cycle), swapped `min`/`max` (Invert), and normalised `min`/`max` (Range) | **Unblocked.** Encoding confirmed; `get_aum_session`'s flat view currently omits these. |
+| **Global Session Load actions invisible** (AUM stores them globally, not in `.aumproj`) | Formalize the daemon-owned registry (PC# → session id) and record it daemon-side since the file can't | **Confirmed file-invisible AND confirmed working** (2026-06-05): `pc 10, ch1` loaded another session live (tap re-instantiated; synth identity changed). The PC→session registry model works; remaining work is authoring/persisting it daemon-side. |
 | **`.aum_aupreset` (user preset) format unknown** | Reverse-engineer the container; add read + stage so user presets are recallable by name | Lower priority; factory presets via PC already work. |
-| **Tempo Presets + full transport/system catalogue not in `BuildSession`** | Extend `buildTransport`/the target catalogue to enumerate Tempo, Tap Tempo, Metronome, Tempo Presets, and known `System` actions | Straightforward once targets are known. |
+| **Tempo Presets + full transport/system catalogue not in `BuildSession`** | Extend `buildTransport`/the target catalogue using the confirmed key strings: `Transport/{Previous bar,Next bar,Metronome on/off,Tempo,Tempo Presets/<idx>:<bpm>}`, `System/_AUM:{ShowSelf,HideAllPlugins,UnSoloAll}`, node `_AUMNode:{Bypass,FrontPlugin,TogglePlugin,PresetLoadCtrl/<idx>:<presetNumber>:<name>}`, `ScrollToChannel` | **Key strings now confirmed** (2026-06-05 capture). Straightforward to enumerate. |
 | **Pan target needs a Stereo Balance node to physically exist** | Have the authoring path auto-insert a Stereo Balance node when a pan CC is requested | Or drop pan from the default convention. |
 | **AUM mixer device divorced from live session** (per PDR) | Auto-derive the AUM mixer `Device` + one `Device` per AUv3 node from the loaded session's `midiMatrixState` (channels, not fixed `ch1..ch8`), `Origin = aum-session` | Lands with the `Binding`→`Device` refactor. |
 
@@ -200,12 +275,22 @@ Mostly Pillar 3 + optional live introspection:
 
 - **Standard scene-change encoding** in `BrainProgram`/`BrainEngine` output (Pillar
   3.2) — the brain must speak exactly the Pillar-2 map.
-- **(Optional) permanent host-introspection channel.** The analysis used `os_log`;
-  a lasting design would stream the brain's transport/musical/observed-MIDI facts
-  to the daemon (a `/host-introspection` push, symmetric to the tap). Scope: a new
-  `ProbeKit` reporter + daemon ingest. Decide whether it's worth it given the host
-  API gives no session graph (limited value beyond transport/tempo the daemon can
-  already infer). Recommend **deferring** unless a concrete need appears.
+- **Permanent host-diagnostics channel — DONE (no longer deferred).** The
+  analysis originally used `os_log` and this was filed as optional/defer; that
+  decision is **reversed**. The earlier "limited value beyond transport/tempo"
+  judgement underrated the surface: the appex can read far more than transport —
+  its own AU identity/capabilities, **MIDI 1.0-vs-2.0 negotiation** and MIDI-CI
+  profiles, the full `AVAudioSession` route/channels/latency, the **CoreMIDI
+  graph** (which endpoints/devices the sandbox can see), and the runtime
+  environment (thermal/power) — none of which the daemon can infer off-device.
+  Streaming the whole `HostDiagnostics` envelope from a view-independent
+  `ProbeKit` reporter to a daemon ingest is therefore worth it as a permanent
+  channel, not a debug crutch. Implemented as a new `ProbeKit` reporter +
+  streamer (`HostDiagnosticsReporter` / `DiagnosticsStreamer`) over
+  `ws://host/diagnostics`, terminated by `mcp-midi-controller`'s
+  `internal/diagnostics` and exposed via the `get_host_diagnostics` MCP tool. See
+  the "Diagnostics protocol" wire contract in
+  [auv3-extension.md](auv3-extension.md).
 - **Known host-API limits to encode in tooling**: `currentMeasureDownbeatPosition`
   and `sampleOffsetToNextBeat` are always 0 (no sample-accurate beat scheduling);
   AUM routes no MIDI clock into the node — the brain schedules off transport
@@ -213,8 +298,10 @@ Mostly Pillar 3 + optional live introspection:
 
 ## Sequencing
 
-1. **Capture the PC type code** (Pillar 1, top row) — small, unblocks preset +
-   session-load authoring. Do it first with the live rig.
+1. **~~Capture the PC type code~~ — DONE (2026-06-05).** Type codes + full key
+   strings + cycle/invert/range encoding all confirmed from a probe `.aumproj`.
+   Next: pin in `spec.go` and extend `buildTransport`/the target catalogue +
+   `midiCtrlState` parser to cover the now-confirmed targets/attributes.
 2. **Canonical map + auto-bake** (Pillar 2.1–2.2) — makes authored sessions
    brain-ready by default; immediate value.
 3. **Wire `recall_scene` → brain** (Pillar 3.1) — the first end-to-end agent scene
@@ -230,11 +317,17 @@ Mostly Pillar 3 + optional live introspection:
 
 ## Risks / open questions
 
-- **PC type code + global Session Load** are *measurement-gated*: they need live
-  AUM captures, not just code. The rig can produce them now.
-- **CC budget**: per-param CC does not scale (measured: writable-param counts up to
-  3225; 23 plugins exceed 128/channel). The map must be **preset-first +
-  curated-CC**, per the device-model PDR — don't regress to bulk binding.
+- **PC type code** — *resolved* (2026-06-05 capture: `PC=2`, `PBEND=3/data1=0`,
+  `CHPRS=3/data1=1`). **Global Session Load** — *resolved/working* (2026-06-05:
+  `pc 10` loaded another session live); remaining work is authoring/persisting the
+  PC→session registry daemon-side, not a measurement.
+- **CC budget**: per-param CC does not scale **on one channel** (measured:
+  writable-param counts up to 3225; 23 plugins exceed 128/channel). Two
+  complementary answers: a **preset-first + curated-CC** device type per plugin
+  (the device-model PDR — don't regress to bulk binding on one channel), and the
+  **golden banking allocator** ([golden-session.md](golden-session.md)) which,
+  when exhaustive control is wanted, banks every target across channels (CC then
+  Note) and reports the overflow rather than colliding.
 - **No MIDI-in from brain to daemon**: the `/midi-control` channel is one-way, so
   the daemon can't *observe* what the brain emitted; verification is via the audio
   tap (ears) only. A future brain→daemon ack/echo is reserved but unbuilt.
@@ -245,8 +338,10 @@ Mostly Pillar 3 + optional live introspection:
 
 Every milestone is verifiable on the live rig with the instrumentation built for
 the analysis: **hands** (`send_midi`/`play_notes`/`set_transport` → brain →
-in-host emit), **eyes** (brain `os_log` introspection: `transport=`/`musical=`),
-**ears** (`get_audio_tap` RMS/dBFS + analysis). The scene demo in
+in-host emit), **eyes** (`get_host_diagnostics` — the streamed `HostDiagnostics`
+snapshot: transport/musical context, AU/MIDI/audio-session/CoreMIDI/environment;
+`os_log` is now just the offline fallback sink), **ears** (`get_audio_tap`
+RMS/dBFS + analysis). The scene demo in
 [aum-control-surface.md](aum-control-surface.md) is the template: drive a mapping,
 read the audible/host-state result, confirm closed-loop.
 

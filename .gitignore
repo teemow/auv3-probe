@@ -25,3 +25,6 @@ Generated/
 
 # macOS
 .DS_Store
+
+# graphify knowledge graph (regenerable, rebuilt by the post-commit hook)
+graphify-out/

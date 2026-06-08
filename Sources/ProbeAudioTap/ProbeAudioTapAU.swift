@@ -25,6 +25,10 @@ public final class ProbeAudioTapAU: AUAudioUnit {
     private struct ControlState {
         var config = TapConfig()
         var streamer: TapStreamer?
+        // Host-diagnostics channel (reporter assembles + streamer ships over
+        // /diagnostics). Created with render resources and torn down with them,
+        // like the audio streamer above.
+        var diagnostics: DiagnosticsChannel?
     }
 
     private var outputBus: AUAudioUnitBus!
@@ -87,9 +91,23 @@ public final class ProbeAudioTapAU: AUAudioUnit {
         let rate = outputBus.format.sampleRate
         let channels = Int(outputBus.format.channelCount)
         dsp.prepare(maxFrames: Int(maximumFramesToRender), channels: channels)
+        // Cache the host blocks so the render thread can capture the sanctioned
+        // transport + musical-context + render-timestamp readback for the
+        // diagnostics reporter (the tap reads the same host surface BrainEngine does).
+        dsp.transportState = transportStateBlock
+        dsp.musicalContext = musicalContextBlock
         control.withLock { state in
             state.streamer = TapStreamer(dsp: dsp, sampleRate: rate, channels: channels)
             applyStreamingStateLocked(&state)
+
+            // Always-on diagnostics: assemble the host snapshot (reading dsp's
+            // published render-thread readback) and stream it to the daemon,
+            // independent of whether audio is being tapped.
+            let diagnostics = DiagnosticsChannel(source: "ProbeAudioTap", audioUnit: self) { [dsp] in
+                dsp.renderSnapshot()
+            }
+            state.diagnostics = diagnostics
+            diagnostics.start()
         }
     }
 
@@ -97,8 +115,12 @@ public final class ProbeAudioTapAU: AUAudioUnit {
         control.withLock { state in
             state.streamer?.stop()
             state.streamer = nil
+            state.diagnostics?.stop()
+            state.diagnostics = nil
         }
         dsp.capturing.store(false, ordering: .relaxed)
+        dsp.transportState = nil
+        dsp.musicalContext = nil
         dsp.teardown()
         super.deallocateRenderResources()
     }
@@ -140,7 +162,7 @@ public struct TapConfig: Codable, Equatable {
     /// Whether the tap is actively streaming.
     public var streaming: Bool
 
-    public init(streaming: Bool = false) {
+    public init(streaming: Bool = true) {
         self.streaming = streaming
     }
 }

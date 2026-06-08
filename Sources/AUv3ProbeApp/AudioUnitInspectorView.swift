@@ -508,10 +508,20 @@ private struct RawJSONSection: View {
     }
 
     private var rawJSONString: String {
-        guard let data = try? details.encoded() else {
+        // The real dump carries the full base64 componentIcon, but rendering tens
+        // of KB of base64 in a Text is useless and slow — preview a redacted copy
+        // and note the icon's archived size separately.
+        var preview = details
+        let iconBytes = preview.componentIcon?.count
+        preview.componentIcon = nil
+        guard let data = try? preview.encoded() else {
             return "// failed to encode details"
         }
-        return String(decoding: data, as: UTF8.self)
+        var out = String(decoding: data, as: UTF8.self)
+        if let iconBytes {
+            out += "\n// componentIcon: <archived UIImage, \(iconBytes) bytes base64 in dump>"
+        }
+        return out
     }
 }
 

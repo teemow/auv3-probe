@@ -13,7 +13,7 @@ public final class ProbeAudioTapViewController: AUViewController, AUAudioUnitFac
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        preferredContentSize = CGSize(width: 480, height: 460)
+        preferredContentSize = CGSize(width: 360, height: 300)
         view.backgroundColor = UIColor(Signalwave.bg)
         installUIIfReady()
     }

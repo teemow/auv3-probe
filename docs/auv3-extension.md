@@ -27,6 +27,14 @@ just beside it.
 Both reuse the shared **signalwave** UI and ProbeKit. The container app keeps its
 existing jobs (read audio units, ferry AUM sessions).
 
+Both extensions also open a third LAN channel, **host diagnostics**
+(`ws://host/diagnostics`): a view-independent reporter streams a full snapshot of
+the host surface the appex can *read* while hosted (transport/musical context,
+the AU's own identity + capabilities, MIDI 1.0-vs-2.0 negotiation, the
+`AVAudioSession` route, the CoreMIDI graph, and the runtime environment). It is
+the **data** counterpart to the brain's "hands" and the tap's "ears" — what the
+`get_host_diagnostics` MCP tool reads. See "Diagnostics protocol" below.
+
 ## Why app extensions (and which kind)
 
 An AUv3 with a UI is a **classic `NSExtension`** (`NSExtensionPointIdentifier =
@@ -59,6 +67,8 @@ flowchart LR
   audioIn["audio channel"] --> tap["ProbeAudioTap (aufx, insert)"]
   tap -->|"passthrough"| audioIn
   tap -->|"WebSocket /audio-stream: PCM + features"| mcp
+  brain -->|"WebSocket /diagnostics: host surface snapshot"| mcp
+  tap -->|"WebSocket /diagnostics: host surface snapshot"| mcp
 ```
 
 ### AUM recipes
@@ -240,6 +250,70 @@ consumes the contract.
 The brain converts each frame into a `MidiCommand` and enqueues it for the render
 thread (see realtime-safety, above).
 
+## Diagnostics protocol (the wire contract)
+
+ProbeMidiBrain / ProbeAudioTap → `ws://<host>/diagnostics` (same `ws`/`wss`
+mapping via `DaemonClient.webSocketURL(path:)`). This is the **data** side of
+"what can the brain *read*?" — the counterpart of the audio-up and MIDI-down
+channels. Each extension reports the full host surface it can observe while
+hosted in AUM, so the daemon (and the `get_host_diagnostics` MCP tool behind it)
+sees it even when nobody has the plugin's introspection panel open. The
+**receiver** side lives in `mcp-midi-controller` (`internal/diagnostics`); this
+repo defines and produces the contract.
+
+The producer is `ProbeKit/DiagnosticsStreamer.swift`; the snapshot is assembled
+by `ProbeKit/HostDiagnosticsReporter.swift` (a view-independent background timer
+started with the AU's render resources) and modeled by `HostDiagnostics` in
+`ProbeKit/HostIntrospection.swift`.
+
+1. **Extension → daemon — one TEXT (JSON) snapshot per frame:** a compact,
+   single-line `HostDiagnostics` envelope (no whitespace; smallest wire
+   footprint). Each frame **replaces** the stored snapshot — it is a full state,
+   not a delta. The envelope is:
+
+   ```json
+   {
+     "schemaVersion": 1,
+     "capturedAt": "2026-06-05T09:11:00Z",
+     "source": "ProbeMidiBrain",
+     "transport":      { "available": true, "moving": false, "recording": false, "cycling": false, "samplePosition": 0, "cycleStartBeat": 0, "cycleEndBeat": 0 },
+     "musicalContext": { "available": true, "tempo": 120.0, "timeSignatureNumerator": 4, "timeSignatureDenominator": 4, "currentBeatPosition": 0, "sampleOffsetToNextBeat": 0, "currentMeasureDownbeatPosition": 0 },
+     "renderTime":     { "available": false, "sampleTime": 0, "hostTime": 0, "rateScalar": 0 },
+     "render":         { "maximumFramesToRender": 0, "midiOutputNames": [], "outputBusFormats": [] },
+     "audioUnit":      { "available": true, "componentType": "aumi", "audioUnitName": "ProbeMidiBrain", "musicDeviceOrEffect": true, "supportsMPE": false, "latency": 0, "parameterTree": { "available": true, "count": 0, "truncated": false, "parameters": [] }, "factoryPresets": [], "userPresets": [] },
+     "midi":           { "available": true, "hostMIDIProtocol": "MIDI 1.0", "audioUnitMIDIProtocol": "MIDI 1.0", "profiles": [] },
+     "audioSession":   { "sampleRate": 48000.0, "ioBufferDuration": 0.005, "category": "...", "outputPorts": [], "inputPorts": [], "availableInputs": [] },
+     "coreMIDI":       { "sources": [], "destinations": [], "devices": [], "externalDevices": [] },
+     "environment":    { "thermalState": "nominal", "lowPowerModeEnabled": false, "physicalMemory": 0, "osVersion": "..." }
+   }
+   ```
+
+   The example is abridged; the authoritative field set is the `Codable`
+   `HostDiagnostics` struct. JSON keys are the Swift property names verbatim;
+   dates are ISO-8601. The three provenance classes are: **sanctioned** AUv3
+   host blocks captured on the render thread (`transport`, `musicalContext`,
+   `renderTime`), **AU-surface** off-thread reads of the hosted `AUAudioUnit`
+   (`render`, `audioUnit`, `midi`), and **backdoors** into the appex sandbox
+   (`audioSession`, `coreMIDI`, `environment`).
+
+2. **Triggers (all carry the full envelope):**
+   - **on connect:** the latest snapshot is sent immediately (or one is forced)
+     so a freshly connected daemon gets the full state without waiting a tick;
+   - **on cadence:** every snapshot the reporter publishes (~1 Hz);
+   - **on route-change / interruption:** an `AVAudioSession` notification forces
+     a fresh capture so the delta (new route, channels, latencies, interruption)
+     reaches the daemon promptly rather than on the next tick.
+
+3. **Daemon → extension:** nothing on the data path. Connect / disconnect is
+   observed daemon-side and surfaced via `NotifyHostDiagnostics`.
+
+The daemon stores the envelope **verbatim** (so fields a newer extension adds
+survive even if the daemon predates them — bump `schemaVersion` only on
+*breaking* changes) and exposes it read-only through `get_host_diagnostics`,
+which returns connection/age metadata plus the full envelope under
+`diagnostics`. When no socket is connected the snapshot still reaches the Linux
+dev loop via the `os_log` fallback (read with `idevicesyslog`).
+
 ## Finding the daemon (Bonjour discovery)
 
 There is **no typed host anywhere**. The `mcp-midi-controller` endpoint is the
@@ -257,7 +331,7 @@ metadata surfaced in the UI:
 
 ```
 version=<daemon semver>        e.g. 1.4.2
-capabilities=<comma list>      e.g. audio,midi,sessions
+capabilities=<comma list>      e.g. audio,midi,sessions,diagnostics
 ```
 
 All three surfaces render one shared element, `ProbeKit/DaemonStatusView.swift`
@@ -331,5 +405,7 @@ Same two paths as the rest of the repo:
   correct AudioComponent registration). **On-device discovery/loadability in AUM**
   is the remaining manual verification (`make deploy` to a trusted device, then
   insert the units in AUM).
-- The audio-stream **receiver** is out of scope for this repo beyond the contract
-  above; it is implemented in `mcp-midi-controller`.
+- The audio-stream and diagnostics **receivers** are out of scope for this repo
+  beyond the contracts above; they are implemented in `mcp-midi-controller`
+  (`internal/audiotap` and `internal/diagnostics`, behind `get_audio_tap` and
+  `get_host_diagnostics`).
