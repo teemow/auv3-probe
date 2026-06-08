@@ -7,9 +7,18 @@ just beside it.
 - **ProbeMidiBrain** (`aumi`, a MIDI processor) — lives in an AUM **MIDI strip**.
   It receives MIDI (the "threefoot" BLE footswitch, routed in by AUM) and, knowing
   the **song structure**, emits **scene-change MIDI** out — driven by the host
-  transport position and by footswitch input. AUM is fully MIDI-controllable and
-  can load a full session from a single MIDI message, so MIDI-out is the lever for
-  scene changes.
+  transport position and by footswitch input. Hosted inside AUM the brain can
+  reach almost AUM's **entire** control surface over MIDI (transport, tempo,
+  mixer, **any node parameter**, session load) — measured in
+  [aum-control-surface.md](aum-control-surface.md) — but only what the loaded
+  session has **mapped**, which is why a deep session model plus a **standard
+  mapping** (the
+  [mcp-midi-controller / aum-brain-control.md](https://github.com/teemow/mcp-midi-controller/blob/main/docs/aum-brain-control.md)
+  vision) is what turns MIDI-out into a reliable lever for scene changes. It also
+  opens a **LAN control channel** to `mcp-midi-controller`
+  (`ws://host/midi-control`): the daemon pushes note/CC/PC/transport commands and
+  the brain re-emits them through its MIDI out — giving an AI agent **"hands"** on
+  the rig, the symmetric counterpart to the tap's "ears".
 - **ProbeAudioTap** (`aufx`, an audio effect) — inserted in an AUM **audio
   channel**. A transparent passthrough that also taps the buffer and streams
   downsampled mono PCM + RMS/peak features over the LAN to `mcp-midi-controller`,
@@ -17,6 +26,14 @@ just beside it.
 
 Both reuse the shared **signalwave** UI and ProbeKit. The container app keeps its
 existing jobs (read audio units, ferry AUM sessions).
+
+Both extensions also open a third LAN channel, **host diagnostics**
+(`ws://host/diagnostics`): a view-independent reporter streams a full snapshot of
+the host surface the appex can *read* while hosted (transport/musical context,
+the AU's own identity + capabilities, MIDI 1.0-vs-2.0 negotiation, the
+`AVAudioSession` route, the CoreMIDI graph, and the runtime environment). It is
+the **data** counterpart to the brain's "hands" and the tap's "ears" — what the
+`get_host_diagnostics` MCP tool reads. See "Diagnostics protocol" below.
 
 ## Why app extensions (and which kind)
 
@@ -30,7 +47,7 @@ AU **type** choice (confirmed against AUM's behaviour):
 
 | Extension | Type | Lives in | Receives MIDI | Taps audio | Emits MIDI |
 |---|---|---|---|---|---|
-| ProbeMidiBrain | `aumi` MIDI processor | MIDI strip | yes (render event list) | no | yes (`MIDIOutputEventBlock`) |
+| ProbeMidiBrain | `aumi` MIDI processor | MIDI strip | yes (render event list + LAN `/midi-control`) | no | yes (`MIDIOutputEventBlock`) |
 | ProbeAudioTap | `aufx` effect | audio channel insert | no (not needed) | yes (render buffer) | no |
 
 MIDI-out works on any AU via `midiOutputNames` + caching `midiOutputEventBlock`
@@ -43,12 +60,15 @@ musical position come from `transportStateBlock` + `musicalContextBlock`.
 flowchart LR
   foot["threefoot BLE footswitch"] -->|"BLE MIDI"| aum["AUM MIDI matrix"]
   transport["AUM transport / musical context"] --> brain
+  mcp["mcp-midi-controller (AI agent)"] -->|"WebSocket /midi-control: notes/CC/PC/transport"| brain
   aum -->|"route to node"| brain["ProbeMidiBrain (aumi)"]
   brain -->|"scene-change MIDI out"| aum
   aum -->|"MIDI to AUM control + other AUs"| scene["session / scene switch"]
   audioIn["audio channel"] --> tap["ProbeAudioTap (aufx, insert)"]
   tap -->|"passthrough"| audioIn
-  tap -->|"WebSocket PCM + features"| mcp["mcp-midi-controller (AI agent)"]
+  tap -->|"WebSocket /audio-stream: PCM + features"| mcp
+  brain -->|"WebSocket /diagnostics: host surface snapshot"| mcp
+  tap -->|"WebSocket /diagnostics: host surface snapshot"| mcp
 ```
 
 ### AUM recipes
@@ -76,9 +96,27 @@ flowchart LR
 
 1. Insert **ProbeAudioTap** as an effect on the audio channel you want to monitor
    (it passes audio through unchanged).
-2. In its UI, enter the `mcp-midi-controller host:port` and press **start
-   streaming**. It connects a WebSocket to `ws://host/audio-stream` and streams
-   decimated mono PCM + RMS/peak.
+2. No host to enter — the tap **auto-discovers** mcp-midi-controller on the LAN
+   via Bonjour and shows it in the shared status element (IP, reachability,
+   version, capabilities). Press **start streaming**: it connects a WebSocket to
+   `ws://host/audio-stream`, streams decimated mono PCM + RMS/peak, and
+   auto-reconnects if the daemon restarts or moves.
+
+**Agent → notes/CC/transport (ProbeMidiBrain LAN control).**
+
+1. Insert **ProbeMidiBrain** on a MIDI strip and route its **MIDI output** to the
+   synth node (and/or AUM's **MIDI Control**) in the matrix.
+2. No host to enter and no toggle — the brain **auto-discovers** the daemon via
+   Bonjour (shown in the shared status element) and the control channel is
+   always-on: it connects `ws://host/midi-control` (auto-reconnecting if the
+   daemon restarts). The daemon's `play_notes` / `send_midi` / `set_transport`
+   MCP tools then push commands the brain re-emits on the render thread through
+   its cached `midiOut`. The "hands" only move when the agent actually sends
+   commands, so there is nothing to enable.
+3. The whole wiring — brain + synth + tap insert + matrix routes + both enable
+   flags — can be authored in one shot by the daemon's `author_loop_session` and
+   loaded with one tap (see "Loading a session into AUM" / push & open below);
+   the daemon endpoint itself is discovered, not authored.
 
 ## Project structure (four targets, two build paths)
 
@@ -134,7 +172,13 @@ blocking**. The two cores follow the same discipline:
   *references* (a retain), not elements. Status the UI reads back (current
   section, last scene, transport) lives in `Atomics`, so the UI never touches the
   realtime lock. MIDI in is parsed from the render event list; MIDI out goes
-  through the cached `midiOutputEventBlock`.
+  through the cached `midiOutputEventBlock`. **LAN control** adds a second
+  producer: `BrainController` (the `/midi-control` WebSocket client, a networking
+  thread) decodes JSON command frames and pushes fixed-size `MidiCommand` values
+  into a lock-free SPSC `MidiCommandRing`; the render block **drains** that ring
+  at the top of each cycle and emits each command through the same cached
+  `midiOut` (allocation-free, never blocking). A ring overflow drops commands
+  rather than glitch audio, mirroring the tap.
 - **ProbeAudioTap / `TapDSP`.** The render block pulls input straight into the
   output buffers (zero-copy passthrough), computes block peak/RMS, and pushes
   decimated mono samples into a **lock-free SPSC ring** (`RealtimeRing`, backed by
@@ -154,37 +198,191 @@ the `mcp-midi-controller` repo; this repo defines and produces the contract:
 1. **On connect — one TEXT (JSON) format message:**
 
    ```json
-   { "type": "format", "encoding": "f32le", "channels": 1,
-     "sampleRate": 11025.0, "source": "ProbeAudioTap" }
+   { "type": "format", "encoding": "f32le", "channels": 2,
+     "sampleRate": 48000.0, "source": "ProbeAudioTap" }
    ```
 
-   `sampleRate` is the **decimated** rate (host rate ÷ decimation).
-2. **Audio — BINARY messages:** little-endian `Float32` mono PCM, decimated, in
-   chunks (no per-chunk header; the format message fixes the layout).
+   `channels` and `sampleRate` are the **host's real** values — the stream is
+   full-fidelity (no downmix, no decimation), so a sound engineer can verify the
+   signal up to the host Nyquist and reason about the stereo image.
+2. **Audio — BINARY messages:** little-endian `Float32` PCM, **interleaved**
+   across channels at the host rate, in chunks (no per-chunk header; the format
+   message fixes the channel count and layout).
 3. **Features — ~10 Hz TEXT (JSON) messages:**
 
    ```json
    { "type": "features", "rms": 0.0123, "peak": 0.0456 }
    ```
 
-The MVP is intentionally small (mono PCM + RMS/peak) and extensible to richer
-features later.
+The contract is small (interleaved PCM + RMS/peak) and extensible to richer
+features later. The daemon derives spectral + musical analysis from the rolling
+PCM window for `get_audio_tap`, serves an on-demand base64 PCM clip
+(`get_audio_clip`, interleaved across channels) for the agent's own analysis,
+and — per probe — captures an **isolated, serialized segment** which it analyses
+and writes to a local stereo float32 WAV (`probe_sound` returns its `wav_path`).
 
-## State persistence (`fullState`)
+## MIDI-control protocol (the wire contract)
 
-Neither extension uses App Groups (which are fragile under free-Apple-ID / xtool
-signing). Instead each AU persists its config inside the **AUM session**, per
-node, via AUv3 `fullState`:
+ProbeMidiBrain → `ws://<host>/midi-control` (same `ws`/`wss` mapping via
+`DaemonClient.webSocketURL(path:)`). Unlike the tap, the brain is a command
+**sink**: it dials the daemon, then reads command frames the daemon pushes. The
+**hub** side lives in `mcp-midi-controller` (`internal/midicontrol`); this repo
+consumes the contract.
 
-- ProbeMidiBrain stores the `BrainProgram` (song sections + footswitch map +
-  output encoding) under `probeMidiBrainProgram`.
-- ProbeAudioTap stores its `TapConfig` (stream host, streaming flag, decimation)
-  under `probeAudioTapConfig`. The host is installation-specific and lives only
-  on-device inside the session — never committed (public-repo rule).
+1. **Daemon → brain — TEXT (JSON) command frames**, one JSON object per message:
 
-Optional later enhancement: an **App Group** so the container app's authoring tab
-can pre-seed an extension's config. Deferred — `fullState` is sufficient and
-avoids the entitlement.
+   ```json
+   { "type": "noteOn",  "channel": 1, "note": 60, "velocity": 100 }
+   { "type": "noteOff", "channel": 1, "note": 60 }
+   { "type": "cc",      "channel": 1, "controller": 74, "value": 64 }
+   { "type": "pc",      "channel": 1, "program": 5 }
+   { "type": "transport", "action": "start" }   // also "stop" / "continue"
+   ```
+
+   `channel` is 1-based (1..16); the brain maps it to the wire MIDI channel.
+   `note`/`velocity`/`controller`/`value`/`program` are 0..127 (clamped on
+   decode). `velocity` defaults to 100 for `noteOn` and 0 for `noteOff` when
+   omitted. Note duration is the daemon's concern: `play_notes` sends `noteOn`,
+   waits, then `noteOff`.
+2. **Brain → daemon:** nothing on the data path (inbound messages are ignored).
+   Connect / disconnect is observed daemon-side and surfaced via `NotifyMidiControl`.
+
+The brain converts each frame into a `MidiCommand` and enqueues it for the render
+thread (see realtime-safety, above).
+
+## Diagnostics protocol (the wire contract)
+
+ProbeMidiBrain / ProbeAudioTap → `ws://<host>/diagnostics` (same `ws`/`wss`
+mapping via `DaemonClient.webSocketURL(path:)`). This is the **data** side of
+"what can the brain *read*?" — the counterpart of the audio-up and MIDI-down
+channels. Each extension reports the full host surface it can observe while
+hosted in AUM, so the daemon (and the `get_host_diagnostics` MCP tool behind it)
+sees it even when nobody has the plugin's introspection panel open. The
+**receiver** side lives in `mcp-midi-controller` (`internal/diagnostics`); this
+repo defines and produces the contract.
+
+The producer is `ProbeKit/DiagnosticsStreamer.swift`; the snapshot is assembled
+by `ProbeKit/HostDiagnosticsReporter.swift` (a view-independent background timer
+started with the AU's render resources) and modeled by `HostDiagnostics` in
+`ProbeKit/HostIntrospection.swift`.
+
+1. **Extension → daemon — one TEXT (JSON) snapshot per frame:** a compact,
+   single-line `HostDiagnostics` envelope (no whitespace; smallest wire
+   footprint). Each frame **replaces** the stored snapshot — it is a full state,
+   not a delta. The envelope is:
+
+   ```json
+   {
+     "schemaVersion": 1,
+     "capturedAt": "2026-06-05T09:11:00Z",
+     "source": "ProbeMidiBrain",
+     "transport":      { "available": true, "moving": false, "recording": false, "cycling": false, "samplePosition": 0, "cycleStartBeat": 0, "cycleEndBeat": 0 },
+     "musicalContext": { "available": true, "tempo": 120.0, "timeSignatureNumerator": 4, "timeSignatureDenominator": 4, "currentBeatPosition": 0, "sampleOffsetToNextBeat": 0, "currentMeasureDownbeatPosition": 0 },
+     "renderTime":     { "available": false, "sampleTime": 0, "hostTime": 0, "rateScalar": 0 },
+     "render":         { "maximumFramesToRender": 0, "midiOutputNames": [], "outputBusFormats": [] },
+     "audioUnit":      { "available": true, "componentType": "aumi", "audioUnitName": "ProbeMidiBrain", "musicDeviceOrEffect": true, "supportsMPE": false, "latency": 0, "parameterTree": { "available": true, "count": 0, "truncated": false, "parameters": [] }, "factoryPresets": [], "userPresets": [] },
+     "midi":           { "available": true, "hostMIDIProtocol": "MIDI 1.0", "audioUnitMIDIProtocol": "MIDI 1.0", "profiles": [] },
+     "audioSession":   { "sampleRate": 48000.0, "ioBufferDuration": 0.005, "category": "...", "outputPorts": [], "inputPorts": [], "availableInputs": [] },
+     "coreMIDI":       { "sources": [], "destinations": [], "devices": [], "externalDevices": [] },
+     "environment":    { "thermalState": "nominal", "lowPowerModeEnabled": false, "physicalMemory": 0, "osVersion": "..." }
+   }
+   ```
+
+   The example is abridged; the authoritative field set is the `Codable`
+   `HostDiagnostics` struct. JSON keys are the Swift property names verbatim;
+   dates are ISO-8601. The three provenance classes are: **sanctioned** AUv3
+   host blocks captured on the render thread (`transport`, `musicalContext`,
+   `renderTime`), **AU-surface** off-thread reads of the hosted `AUAudioUnit`
+   (`render`, `audioUnit`, `midi`), and **backdoors** into the appex sandbox
+   (`audioSession`, `coreMIDI`, `environment`).
+
+2. **Triggers (all carry the full envelope):**
+   - **on connect:** the latest snapshot is sent immediately (or one is forced)
+     so a freshly connected daemon gets the full state without waiting a tick;
+   - **on cadence:** every snapshot the reporter publishes (~1 Hz);
+   - **on route-change / interruption:** an `AVAudioSession` notification forces
+     a fresh capture so the delta (new route, channels, latencies, interruption)
+     reaches the daemon promptly rather than on the next tick.
+
+3. **Daemon → extension:** nothing on the data path. Connect / disconnect is
+   observed daemon-side and surfaced via `NotifyHostDiagnostics`.
+
+The daemon stores the envelope **verbatim** (so fields a newer extension adds
+survive even if the daemon predates them — bump `schemaVersion` only on
+*breaking* changes) and exposes it read-only through `get_host_diagnostics`,
+which returns connection/age metadata plus the full envelope under
+`diagnostics`. When no socket is connected the snapshot still reaches the Linux
+dev loop via the `os_log` fallback (read with `idevicesyslog`).
+
+## Finding the daemon (Bonjour discovery)
+
+There is **no typed host anywhere**. The `mcp-midi-controller` endpoint is the
+same for the whole rig, but the container app and both extensions run in
+separate processes — and App Groups can't share a value between them under
+xtool / free-Apple-ID signing (the entitlement is accepted but each process gets
+a *private*, non-shared `group.*` plist; confirmed on-device). So instead, each
+process **auto-discovers** the daemon on the LAN.
+
+`ProbeKit/DaemonDiscovery.swift` runs an `NWBrowser` for the Bonjour service
+type **`_mcpmidi._tcp`**, resolves the chosen service to a concrete `host:port`
+(via a throwaway `NWConnection` so we get the actual reachable address), and
+polls `GET /healthz` to confirm reachability. The daemon's **TXT record** carries
+metadata surfaced in the UI:
+
+```
+version=<daemon semver>        e.g. 1.4.2
+capabilities=<comma list>      e.g. audio,midi,sessions,diagnostics
+```
+
+All three surfaces render one shared element, `ProbeKit/DaemonStatusView.swift`
+— discovered IP, connection status (connected / discovered-but-unreachable /
+searching), capabilities chips, and version — driven by the
+`DaemonDiscovery.shared` singleton. The networking clients
+(`TapStreamer`, `BrainController`) read `DaemonDiscovery.shared.currentHost` on
+every (re)connect attempt; the app's HTTP flows get their `DaemonClient` from the
+same place via `Receiver`.
+
+Requires, in **every** bundle's Info.plist (app + both appex):
+`NSBonjourServices` listing `_mcpmidi._tcp`, plus `NSLocalNetworkUsageDescription`
+and the per-app **Local Network** permission. The daemon side (advertising the
+service + TXT) lives in the `mcp-midi-controller` repo.
+
+Everything *node-specific* still persists inside the **AUM session**, per node,
+via AUv3 `fullState`:
+
+- ProbeMidiBrain stores only the `BrainProgram` (song sections + footswitch map
+  + output encoding) under `probeMidiBrainProgram`. Its control channel is
+  always-on (no flag) — it auto-connects to the discovered daemon.
+- ProbeAudioTap stores its `TapConfig` (streaming flag + decimation) under
+  `probeAudioTapConfig`.
+
+So the daemon can author the tap's streaming flag into a `.aumproj` (AUM's
+per-node `AuStateDoc`) and both extensions come up connected on load — the
+endpoint is discovered, never authored. See the `author_loop_session` MCP tool
+and `mcp-midi-controller`'s `docs/research/aum-midi-matrix.md` / `agent-loop.md`.
+
+## Auto-reconnect
+
+Both LAN clients (`TapStreamer`, `BrainController`) keep the connection alive
+once enabled: on socket failure or close — e.g. when `mcp-midi-controller`
+restarts — they retry on their private serial queue every ~2 s until `stop()`,
+re-reading the discovered host each attempt (so a daemon that comes back, or
+moves to a new address, is picked up on the next cycle). Stale-socket callbacks
+are ignored by an identity check, so a replaced connection never tears down a
+healthy one.
+
+## Loading a session into AUM (push & open)
+
+The container app's AUM-sessions tab can load a daemon-authored session in one
+tap when an AUM folder is linked: it downloads the staged `.aumproj`, writes it
+into the linked AUM folder, then opens AUM's Universal Link
+`https://kymatica.com/aum/open/<name>.aumproj`. AUM opens the session and applies
+its MIDI matrix, so the brain/synth/tap wiring comes up wired and connected. This
+is the "load" step of the agent loop (author → load → play → hear → tweak).
+
+Because the daemon is found via Bonjour (see "Finding the daemon"), a session
+loaded with the on/off flags set comes up connected automatically — there is no
+host to pre-seed or re-type anywhere.
 
 ## Building
 
@@ -207,5 +405,7 @@ Same two paths as the rest of the repo:
   correct AudioComponent registration). **On-device discovery/loadability in AUM**
   is the remaining manual verification (`make deploy` to a trusted device, then
   insert the units in AUM).
-- The audio-stream **receiver** is out of scope for this repo beyond the contract
-  above; it is implemented in `mcp-midi-controller`.
+- The audio-stream and diagnostics **receivers** are out of scope for this repo
+  beyond the contracts above; they are implemented in `mcp-midi-controller`
+  (`internal/audiotap` and `internal/diagnostics`, behind `get_audio_tap` and
+  `get_host_diagnostics`).

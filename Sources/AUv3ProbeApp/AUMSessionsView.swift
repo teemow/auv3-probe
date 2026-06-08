@@ -520,6 +520,17 @@ struct AUMSessionsView: View {
                     .tint(Signalwave.green)
             } else {
                 HStack(spacing: 16) {
+                    if folder.isBound && !entry.isMidiMap {
+                        Button {
+                            Task { await model.pushAndOpen(entry, client: receiver.client, folder: folder) }
+                        } label: {
+                            Image(systemName: "play.circle")
+                                .foregroundStyle(Signalwave.green)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("push \(entry.filename) into aum and open it")
+                    }
+
                     Button {
                         if folder.isBound {
                             destinationFor = entry

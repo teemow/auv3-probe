@@ -1,6 +1,8 @@
 import Foundation
 import AVFoundation
 import AudioToolbox
+import CoreMIDI
+import os
 import ProbeKit
 
 // ProbeMidiBrain — an `aumi` MIDI-processor AUv3 that lives in an AUM MIDI strip.
@@ -22,6 +24,23 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
 
     /// The authored program. Setting it republishes to the realtime engine.
     public private(set) var program: BrainProgram = .demo
+
+    // The control plane (the LAN-command controller) is touched from the
+    // render-resource thread (allocateRenderResources / deallocate), so it is
+    // guarded by a non-realtime lock. The realtime render thread never touches
+    // it — it only drains the engine's command ring (lock-free). The channel is
+    // always-on: it auto-connects to the Bonjour-discovered daemon (the "hands"
+    // only act when the agent actually sends commands), so there is no enable
+    // flag — connection state is shown by the shared DaemonStatusView.
+    private let control = OSAllocatedUnfairLock(initialState: ControlState())
+
+    private struct ControlState {
+        var controller: BrainController?
+        // Host-diagnostics channel (reporter assembles + streamer ships over
+        // /diagnostics). Created with render resources and torn down with them,
+        // alongside the BrainController.
+        var diagnostics: DiagnosticsChannel?
+    }
 
     /// Key under which the program is stored inside `fullState`.
     private static let programStateKey = "probeMidiBrainProgram"
@@ -54,6 +73,20 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         ["ProbeMidiBrain"]
     }
 
+    // MARK: - MIDI protocol negotiation
+
+    /// Advertise that this AU is happy to receive MIDI 2.0. The host reads this
+    /// before allocating render resources; if it (AUM) supports MIDI 2.0 it then
+    /// delivers inbound events as `AURenderEventMIDIEventList` (UMP) in this
+    /// protocol, otherwise it falls back to legacy `AURenderEventMIDI`. The render
+    /// block records which path/protocol AUM actually used (see BrainEngine's
+    /// `observeUMP`), and the negotiated `hostMIDIProtocol`/`audioUnitMIDIProtocol`
+    /// pair is captured off-thread by the diagnostics collector — together they
+    /// reveal whether AUM is driving the node with MIDI 1.0 or 2.0.
+    public override var audioUnitMIDIProtocol: MIDIProtocolID {
+        ._2_0
+    }
+
     // MARK: - Program (authoring API for the view model)
 
     /// Replace the program and republish it to the realtime engine.
@@ -68,9 +101,56 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
             sectionIndex: engine.statusSection.load(ordering: .relaxed),
             scene: engine.statusScene.load(ordering: .relaxed),
             playing: engine.statusPlaying.load(ordering: .relaxed),
-            emitCount: engine.statusEmitCount.load(ordering: .relaxed)
+            emitCount: engine.statusEmitCount.load(ordering: .relaxed),
+            commandCount: engine.statusCommandCount.load(ordering: .relaxed)
         )
     }
+
+    // MARK: - Host introspection (control-surface analysis)
+
+    /// The most recent host-diagnostics snapshot assembled by the view-independent
+    /// `HostDiagnosticsReporter` (started with render resources). The UI reads this
+    /// passively — capture is owned by the reporter, not the panel — so it is nil
+    /// until render resources are allocated and the reporter has ticked once.
+    public var latestDiagnostics: HostIntrospection? {
+        control.withLock { $0.diagnostics?.latest }
+    }
+
+    /// Force an immediate diagnostics capture for the panel's on-demand "dump"
+    /// button. Routed through the reporter so the assembled snapshot also reaches
+    /// the os_log fallback and any connected `/diagnostics` stream. Returns the
+    /// fresh snapshot, or nil when the reporter is not running (render resources
+    /// not yet allocated).
+    @discardableResult
+    public func captureIntrospection() -> HostIntrospection? {
+        control.withLock { $0.diagnostics?.capture() }
+    }
+
+    /// The accumulated observed-MIDI tally (drained from the render thread's ring
+    /// off the render thread). Read by the UI; reset between experiments.
+    public private(set) var observedSummary = ObservedMidiSummary()
+
+    /// Drain every observed inbound MIDI event captured by the render thread into
+    /// the running summary and return it. Called off the render thread (UI timer).
+    @discardableResult
+    public func pollObservedMIDI() -> ObservedMidiSummary {
+        var event = ObservedMidiEvent()
+        while engine.observedRing.pop(into: &event) {
+            observedSummary.record(event)
+        }
+        return observedSummary
+    }
+
+    /// Reset the observed-MIDI tally (e.g. before a fresh experiment).
+    public func resetObservedMIDI() {
+        observedSummary = ObservedMidiSummary()
+    }
+
+#if DEBUG
+    /// The dev-only CoreMIDI backdoor (enumerate destinations + direct CC send),
+    /// for the "can the appex drive AUM outside the AU graph?" experiment.
+    public let backdoor = MidiBackdoor()
+#endif
 
     // MARK: - Render resources
 
@@ -82,9 +162,36 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         engine.transportState = transportStateBlock
         engine.reset()
         engine.setProgram(program)
+        // Create the LAN command channel client (sharing the engine's ring) and
+        // start it — it auto-discovers the daemon and auto-reconnects.
+        control.withLock { state in
+            let controller = BrainController(ring: engine.commandRing)
+            state.controller = controller
+            controller.start()
+
+            // Always-on diagnostics: assemble the host snapshot (reading the
+            // engine's published render-thread readback) and stream it to the
+            // daemon, independent of whether the plugin UI is open. BrainEngine
+            // captures only transport + musical context on the render thread (no
+            // render `AudioTimeStamp`), so `renderTime` stays unavailable here —
+            // that field is populated by ProbeAudioTap, which reads it.
+            let diagnostics = DiagnosticsChannel(source: "ProbeMidiBrain", audioUnit: self) { [engine] in
+                let host = engine.hostSnapshot()
+                return HostRenderSnapshot(transport: host.transport,
+                                          musicalContext: host.musicalContext)
+            }
+            state.diagnostics = diagnostics
+            diagnostics.start()
+        }
     }
 
     public override func deallocateRenderResources() {
+        control.withLock { state in
+            state.controller?.stop()
+            state.controller = nil
+            state.diagnostics?.stop()
+            state.diagnostics = nil
+        }
         engine.midiOut = nil
         engine.musicalContext = nil
         engine.transportState = nil
@@ -121,4 +228,5 @@ public struct BrainStatus: Equatable, Sendable {
     public var scene: Int
     public var playing: Bool
     public var emitCount: Int
+    public var commandCount: Int
 }

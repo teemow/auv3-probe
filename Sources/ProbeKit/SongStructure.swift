@@ -22,6 +22,41 @@ public enum SceneChangeMode: String, Codable, Equatable, Sendable, CaseIterable 
     case controlChange
 }
 
+/// The canonical brain-control convention — the single MIDI vocabulary shared
+/// with the `mcp-midi-controller` daemon (`internal/aum` Convention + aum.yaml /
+/// docs/research/aum.md). The brain pins its scene/session-change output to this
+/// map so transport-boundary and footswitch triggers produce *exactly* the
+/// standard messages the daemon authors into a session and sends over the
+/// `/midi-control` channel. This is the explicit channel allocation the plan
+/// (Pillar 2.1 / 3.2) calls for.
+///
+/// Channel allocation (1-indexed, matching the daemon's specState channel):
+///   - **channel 1**: the shared control surface — mixer CCs, the transport
+///     block, node-param CCs — and Session Load Program Changes. The daemon
+///     authors sessions with `Convention{Channel: 1}` by default; the brain
+///     emits on the same channel so a single vocabulary drives the whole rig.
+///
+/// Scene/session load is a Program Change (`session_load` in aum.yaml), not a
+/// CC: AUM loads a whole session from a single PC, so a scene index maps 1:1 to
+/// a program number. The transport CCs mirror `conventionTransportCC` in the
+/// daemon and are provided for reference / brain-side transport emission.
+public enum BrainControlConvention {
+    /// The MIDI channel (1-16) the convention rides; matches the daemon's
+    /// default Convention channel.
+    public static let channel = 1
+    /// Scene/session changes are Program Changes (the canonical session-load
+    /// encoding); the scene index is the program number.
+    public static let sceneChangeMode: SceneChangeMode = .programChange
+
+    /// Transport-block CCs (mirror `conventionTransportCC` in the daemon).
+    public static let transportTogglePlayCC = 20
+    public static let transportStartCC = 102
+    public static let transportStopCC = 103
+    public static let transportRewindCC = 104
+    public static let transportToggleRecordCC = 105
+    public static let tapTempoCC = 108
+}
+
 /// One section of the song, pinned to an absolute musical position (in beats
 /// from the start of the host timeline). When the transport crosses a section's
 /// `startBeat`, the brain recalls `scene`.
@@ -91,14 +126,30 @@ public struct BrainProgram: Codable, Equatable, Sendable {
 
     public init(sections: [SongSection] = [],
                 footswitches: [FootswitchMapping] = [],
-                outputChannel: Int = 1,
-                sceneChangeMode: SceneChangeMode = .programChange,
+                outputChannel: Int = BrainControlConvention.channel,
+                sceneChangeMode: SceneChangeMode = BrainControlConvention.sceneChangeMode,
                 sceneCC: Int = 0) {
         self.sections = sections
         self.footswitches = footswitches
         self.outputChannel = outputChannel
         self.sceneChangeMode = sceneChangeMode
         self.sceneCC = sceneCC
+    }
+
+    /// A program pinned to the canonical brain-control convention: scene changes
+    /// are Program Changes on the convention channel, so the brain's output
+    /// matches exactly what the daemon authors and what `recall_scene` sends.
+    /// Authoring tools should start from this so a brain is interoperable with
+    /// the daemon's scene recall out of the box.
+    public static func standard(sections: [SongSection] = [],
+                                footswitches: [FootswitchMapping] = []) -> BrainProgram {
+        BrainProgram(
+            sections: sections,
+            footswitches: footswitches,
+            outputChannel: BrainControlConvention.channel,
+            sceneChangeMode: BrainControlConvention.sceneChangeMode,
+            sceneCC: 0
+        )
     }
 
     /// A small starter program so a freshly-inserted brain does something

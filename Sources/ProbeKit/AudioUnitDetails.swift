@@ -155,16 +155,26 @@ public struct AudioUnitDetails: Codable, Equatable {
     /// `auAudioUnit.supportsUserPresets`.
     public var supportsUserPresets: Bool?
 
+    /// The plugin's icon, as the bytes of
+    /// `NSKeyedArchiver.archivedData(withRootObject: uiImage)` — i.e. an archived
+    /// `UIImage`, exactly what AUM stores in an `AUMNodeArchive.componentIcon`, so
+    /// the daemon's author can graft it verbatim into an authored node. Captured
+    /// on-device via `AudioComponentCopyIcon`. Encodes as base64 (Swift `Data`'s
+    /// default JSON form), matching the Go `ComponentIcon []byte`. Omitted when no
+    /// icon is available. See docs (the auv3-probe app plan).
+    public var componentIcon: Data?
+
     enum CodingKeys: String, CodingKey {
         case component, name, parameters, shortName, factoryPresets, userPresets
         case channelCapabilities, latency, tailTime, supportsUserPresets
+        case componentIcon
     }
 
     public init(component: AudioUnitComponent, name: String, parameters: [ParameterInfo],
                 shortName: String? = nil, factoryPresets: [PresetInfo]? = nil,
                 userPresets: [PresetInfo]? = nil, channelCapabilities: [Int]? = nil,
                 latency: Double? = nil, tailTime: Double? = nil,
-                supportsUserPresets: Bool? = nil) {
+                supportsUserPresets: Bool? = nil, componentIcon: Data? = nil) {
         self.component = component
         self.name = name
         self.parameters = parameters
@@ -175,6 +185,7 @@ public struct AudioUnitDetails: Codable, Equatable {
         self.latency = latency
         self.tailTime = tailTime
         self.supportsUserPresets = supportsUserPresets
+        self.componentIcon = componentIcon
     }
 
     /// Encodes the details to stable, pretty JSON. `.sortedKeys` guarantees a

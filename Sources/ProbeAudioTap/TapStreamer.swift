@@ -1,26 +1,27 @@
 import Foundation
-import os
-import Atomics
 import ProbeKit
 
 // TapStreamer drains the realtime ring on a background queue and streams the
-// audio to mcp-midi-controller over a WebSocket. It reuses ProbeKit's
-// DaemonClient host parsing (`webSocketURL(path:)`) so the stream target matches
-// the host the rest of the rig uses.
+// audio to mcp-midi-controller over a WebSocket. Discovery + reconnect live in
+// the shared ProbeKit `ReconnectingWebSocket`; this type adds the send side:
+// drain the ring, ship interleaved PCM, and emit periodic feature messages.
 //
 // Wire contract (see docs/auv3-extension.md, "Audio-stream protocol"):
 //   - on connect, one TEXT message:  {"type":"format","encoding":"f32le",
-//       "channels":1,"sampleRate":<decimated Hz>,"source":"ProbeAudioTap"}
-//   - audio: BINARY messages of little-endian Float32 mono PCM (decimated).
+//       "channels":<host ch>,"sampleRate":<host Hz>,"source":"ProbeAudioTap"}
+//   - audio: BINARY messages of little-endian Float32 PCM, interleaved across
+//       channels at the host sample rate (full fidelity, no downmix/decimation).
 //   - ~10 Hz TEXT feature messages: {"type":"features","rms":<f>,"peak":<f>}.
 // The receiver side lives in the mcp-midi-controller repo; this end only defines
 // and produces the contract.
-final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+final class TapStreamer: @unchecked Sendable {
     private let dsp: TapDSP
     private let sampleRate: Double
-    private let queue = DispatchQueue(label: "com.teemow.auv3probe.tapstreamer")
+    private let channels: Int
+    private let socket: ReconnectingWebSocket
 
-    private var session: URLSession?
+    // All of the following are touched only on `socket.queue` (via the socket
+    // hooks and the drain timer, which is scheduled on that same queue).
     private var task: URLSessionWebSocketTask?
     private var timer: DispatchSourceTimer?
     private var drain: UnsafeMutableBufferPointer<Float>
@@ -31,88 +32,72 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
     private var inFlight = 0
     private static let maxInFlight = 32
 
-    /// Observable status for the UI.
-    let connected = ManagedAtomic<Bool>(false)
-    let lastError = OSAllocatedUnfairLockBox<String?>(nil)
-
-    init(dsp: TapDSP, sampleRate: Double) {
+    init(dsp: TapDSP, sampleRate: Double, channels: Int) {
         self.dsp = dsp
         self.sampleRate = sampleRate
-        // Drain in chunks of up to ~10 ms of decimated audio per tick.
-        self.drain = UnsafeMutableBufferPointer<Float>.allocate(capacity: 4096)
-        super.init()
+        self.channels = max(1, channels)
+        // Drain in chunks per tick. At 48 kHz stereo a 10 ms tick produces ~960
+        // interleaved floats, so 8192 comfortably absorbs bursts after a hiccup
+        // (~85 ms of stereo) and keeps the byte rate (~384 KB/s) flowing.
+        self.drain = UnsafeMutableBufferPointer<Float>.allocate(capacity: 8192)
+        self.socket = ReconnectingWebSocket(path: "audio-stream",
+                                            label: "com.teemow.auv3probe.tapstreamer")
+        socket.onConnect = { [weak self] task in
+            guard let self = self else { return }
+            self.task = task
+            self.sendFormat(on: task)
+            self.startTimer()
+        }
+        socket.onDisconnect = { [weak self] in
+            guard let self = self else { return }
+            self.timer?.cancel()
+            self.timer = nil
+            self.task = nil
+            self.inFlight = 0
+            self.ticksSinceFeature = 0
+        }
     }
 
     deinit {
         drain.deallocate()
     }
 
-    /// Decimated (streamed) sample rate.
-    private var streamRate: Double { sampleRate / Double(max(1, dsp.decimation.load(ordering: .relaxed))) }
+    /// Enable streaming and keep it connected (auto-reconnecting). The host comes
+    /// from Bonjour discovery (DaemonDiscovery.shared.currentHost).
+    func start() { socket.start() }
 
-    func start(host: String) {
-        queue.async { [self] in
-            stopLocked()
-            guard let client = DaemonClient(host: host),
-                  let url = client.webSocketURL(path: "audio-stream") else {
-                lastError.value = "bad host"
-                return
-            }
-            let config = URLSessionConfiguration.default
-            let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-            let task = session.webSocketTask(with: url)
-            self.session = session
-            self.task = task
-            task.resume()
-            receiveLoop()
-            sendFormat()
-            startTimer()
-        }
-    }
+    func stop() { socket.stop() }
 
-    func stop() {
-        queue.async { [self] in stopLocked() }
-    }
-
-    private func stopLocked() {
-        timer?.cancel()
-        timer = nil
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
-        session?.invalidateAndCancel()
-        session = nil
-        inFlight = 0
-        ticksSinceFeature = 0
-        connected.store(false, ordering: .relaxed)
-    }
+    // MARK: - Send side (all on `socket.queue`)
 
     private func startTimer() {
-        let t = DispatchSource.makeTimerSource(queue: queue)
+        let t = DispatchSource.makeTimerSource(queue: socket.queue)
         t.schedule(deadline: .now() + 0.01, repeating: 0.01)
         t.setEventHandler { [weak self] in self?.tick() }
         timer = t
         t.resume()
     }
 
-    private func sendFormat() {
+    private func sendFormat(on task: URLSessionWebSocketTask) {
         let header: [String: Any] = [
             "type": "format",
             "encoding": "f32le",
-            "channels": 1,
-            "sampleRate": streamRate,
+            "channels": channels,
+            "sampleRate": sampleRate,
             "source": "ProbeAudioTap",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: header),
            let json = String(data: data, encoding: .utf8) {
-            task?.send(.string(json)) { _ in }
+            task.send(.string(json)) { _ in }
         }
     }
 
     private func tick() {
         guard let task = task else { return }
 
-        // Drain whatever the render thread has produced and ship it, unless we
-        // have too many sends in flight (socket fell behind) — then drop.
+        // Drain whatever the render thread has produced (interleaved float32 at
+        // the host rate) and ship it, unless we have too many sends in flight
+        // (socket fell behind) — then drop.
         var produced = dsp.ring.read(into: drain)
         while produced > 0 {
             if inFlight >= Self.maxInFlight { break }
@@ -124,7 +109,7 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
             task.send(.data(data)) { [weak self] _ in
                 // Completion may run on an arbitrary queue; hop back to our serial
                 // queue to mutate inFlight safely.
-                self?.queue.async { if let self = self { self.inFlight -= 1 } }
+                self?.socket.queue.async { if let self = self { self.inFlight -= 1 } }
             }
             if produced < drain.count { break }
             produced = dsp.ring.read(into: drain)
@@ -141,42 +126,5 @@ final class TapStreamer: NSObject, URLSessionWebSocketDelegate, @unchecked Senda
                 task.send(.string(json)) { _ in }
             }
         }
-    }
-
-    private func receiveLoop() {
-        task?.receive { [weak self] result in
-            guard let self = self else { return }
-            switch result {
-            case .success:
-                self.receiveLoop()
-            case .failure(let error):
-                self.lastError.value = error.localizedDescription
-                self.connected.store(false, ordering: .relaxed)
-            }
-        }
-    }
-
-    // MARK: - URLSessionWebSocketDelegate
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
-                    didOpenWithProtocol protocol: String?) {
-        connected.store(true, ordering: .relaxed)
-        lastError.value = nil
-    }
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
-                    didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        connected.store(false, ordering: .relaxed)
-    }
-}
-
-/// A tiny lock-protected box for a value shared between the stream queue and the
-/// UI thread (the last error string). Not on the realtime path.
-final class OSAllocatedUnfairLockBox<Value>: @unchecked Sendable {
-    private let lock: OSAllocatedUnfairLock<Value>
-    init(_ initial: Value) { lock = OSAllocatedUnfairLock(initialState: initial) }
-    var value: Value {
-        get { lock.withLock { $0 } }
-        set { lock.withLock { $0 = newValue } }
     }
 }

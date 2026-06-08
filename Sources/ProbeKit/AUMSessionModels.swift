@@ -251,6 +251,16 @@ public struct ChannelInfo: Codable, Equatable, Identifiable {
 /// One plugin/processing node on a channel. `component` is present only for AUv3
 /// nodes (reusing the same AudioUnitComponent identity the audio-unit scan reads).
 public struct NodeInfo: Codable, Equatable, Identifiable {
+    /// Raw archive index of this node in the channel's node array — AUM's own
+    /// `slot<S>` key, the same index midiCtrlState targets use (so a mapping's
+    /// `…/slot<S>/…` aligns 1:1 with this value). NOTE: it is *storage/creation
+    /// order, not signal-chain or visible-effect order*. AUM appends nodes as
+    /// created, so a channel is typically `slot0` = source, `slot1` = the
+    /// auto-created HW-output node, and an effect inserted as the *first visible
+    /// effect slot* lands at `slot2` (after the output node). Resolve a node by
+    /// its `component` / `archiveDescClass` identity — never assume `slot0` is
+    /// the first effect. (Verified 2026-06-05: iSEM `slot0`, HWOutput `slot1`,
+    /// ProbeAudioTap `slot2`.)
     public let slot: Int
     public let archiveDescClass: String?
     public let componentName: String?
@@ -300,11 +310,28 @@ public struct NodeInfo: Codable, Equatable, Identifiable {
 }
 
 /// One flattened mapping leaf in an AUMSessionMap (an assigned MIDI control).
+///
+/// `collection` is the path to the target's container (e.g.
+/// `Channels/chan0/Channel controls`), `target` the leaf key. A preset-load
+/// target is `_AUMNode:PresetLoadCtrl/<idx>:<presetNumber>:<name>`, where the
+/// middle field is the AU preset's OWN number, NOT the MIDI program — the program
+/// that fires it is this leaf's `data1` (verified 2026-06-05: `…/1:1:Damage_Bass`
+/// fires on PC `data1=2`). The `slot<S>` segment is a raw archive index, not
+/// visible-effect order (see `NodeInfo.slot`).
 public struct MappingInfo: Codable, Equatable, Identifiable {
     public let collection: String
     public let target: String
     public let type: Int
+    /// Human label for `type` (e.g. "CC", "Note", "PC", "PBEND", "CHPRS"),
+    /// resolved against the leaf's on-disk encoding. Mirrors the Go side's
+    /// `aum.Spec.TypeName()` / `MappingInfo.typeName`. Empty when unknown.
+    public let typeName: String
     public let data1: Int
+    /// Raw on-disk channel value. In BOTH encodings it is 0-based: stored 0 →
+    /// MIDI/send channel 1, stored 15 → channel 16 (verified live 2026-06-05;
+    /// AUM's picker "0 = OMNI" label does NOT match the stored value). The brain
+    /// drives a leaf on `channel + 1`; the inspector renders `channel + 1` to
+    /// match AUM. Mirrors Go `aum.Spec.Channel`.
     public let channel: Int
     public let min: Double
     public let max: Double
@@ -315,14 +342,16 @@ public struct MappingInfo: Codable, Equatable, Identifiable {
     public var id: String { "\(collection)/\(target)/\(type)/\(data1)/\(channel)" }
 
     enum CodingKeys: String, CodingKey {
-        case collection, target, type, data1, channel, min, max, autoToggle, enabled
+        case collection, target, type, typeName, data1, channel, min, max, autoToggle, enabled
     }
 
-    public init(collection: String, target: String, type: Int, data1: Int, channel: Int,
-                min: Double, max: Double, autoToggle: Bool, enabled: Bool) {
+    public init(collection: String, target: String, type: Int, typeName: String = "",
+                data1: Int, channel: Int, min: Double, max: Double,
+                autoToggle: Bool, enabled: Bool) {
         self.collection = collection
         self.target = target
         self.type = type
+        self.typeName = typeName.isEmpty ? MappingInfo.specStateTypeName(type: type, data1: data1) : typeName
         self.data1 = data1
         self.channel = channel
         self.min = min
@@ -342,5 +371,52 @@ public struct MappingInfo: Codable, Equatable, Identifiable {
         max = try c.decodeIfPresent(Double.self, forKey: .max) ?? 0
         autoToggle = try c.decodeIfPresent(Bool.self, forKey: .autoToggle) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        // Trust the daemon's label when present; otherwise derive it. Sessions
+        // returned over the wire are version-13 (specState), so the specState
+        // enum is the right fallback.
+        let decoded = try c.decodeIfPresent(String.self, forKey: .typeName) ?? ""
+        typeName = decoded.isEmpty ? MappingInfo.specStateTypeName(type: type, data1: data1) : decoded
+    }
+
+    /// Human label for a MIDI message type, correct for the on-disk leaf
+    /// encoding. The specState (version 13) and packed (version 8/10) encodings
+    /// use DIFFERENT type enums (e.g. a Note is specState type 1 but packed type
+    /// 5), so the encoding must be supplied. Mirrors Go `aum.Spec.TypeName()`.
+    ///
+    /// specState codes confirmed 2026-06-05 from a hand-mapped probe capture:
+    /// 0=CC, 1=Note, 2=Program Change, 3=Pitch Bend / Channel Pressure (split by
+    /// `data1`: 0=PBEND, 1=CHPRS).
+    public static func typeLabel(specState: Bool, type: Int, data1: Int) -> String {
+        if specState {
+            switch type {
+            case 0: return "CC"
+            case 1: return "Note"
+            case 2: return "PC"
+            case 3: return data1 == 1 ? "CHPRS" : "PBEND"
+            default: return "type\(type)"
+            }
+        }
+        switch type {
+        case 0: return "CC"
+        case 5: return "Note"
+        case 4: return "value-placeholder"
+        case 6: return "trigger-placeholder"
+        default: return "type\(type)"
+        }
+    }
+
+    static func specStateTypeName(type: Int, data1: Int) -> String {
+        typeLabel(specState: true, type: type, data1: data1)
+    }
+
+    /// Compact "what fires this" label for the inspector, e.g. "CC 7", "Note 60",
+    /// "PC 5"; Pitch Bend / Channel Pressure carry no number (their `data1` is a
+    /// subtype selector, not a CC/note byte) so just the label is shown.
+    public var valueLabel: String {
+        if typeName == "PBEND" || typeName == "CHPRS" { return typeName }
+        if typeName.isEmpty || typeName.hasPrefix("type") {
+            return "type \(type) · data1 \(data1)"
+        }
+        return "\(typeName) \(data1)"
     }
 }

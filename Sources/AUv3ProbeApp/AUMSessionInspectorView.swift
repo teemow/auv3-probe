@@ -453,7 +453,7 @@ struct AUMSessionInspectorView: View {
                     .textSelection(.enabled)
             }
 
-            Text("type \(mapping.type) · data1 \(mapping.data1) · ch \(mapping.channel) · \(formatNumber(mapping.min))–\(formatNumber(mapping.max))")
+            Text("\(mapping.valueLabel) · ch \(mapping.channel + 1) · \(formatNumber(mapping.min))–\(formatNumber(mapping.max))")
                 .font(Signalwave.mono(.caption2))
                 .foregroundStyle(Signalwave.dim.opacity(0.85))
                 .textSelection(.enabled)

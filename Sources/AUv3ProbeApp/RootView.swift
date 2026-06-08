@@ -28,7 +28,7 @@ struct RootView: View {
         .environmentObject(receiver)
     }
 
-    // MARK: - Shared daemon host bar
+    // MARK: - Shared daemon status bar
 
     private var receiverBar: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -39,47 +39,11 @@ struct RootView: View {
                     .font(Signalwave.mono(.headline, weight: .bold))
                     .foregroundStyle(Signalwave.fg)
                 Spacer()
-                if receiver.isTesting {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(Signalwave.green)
-                }
             }
 
-            Text("// mcp-midi-controller host on your lan (optional)")
-                .font(Signalwave.mono(.caption2))
-                .foregroundStyle(Signalwave.dim)
-
-            HStack(spacing: 8) {
-                Text(">")
-                    .font(Signalwave.mono(.body, weight: .bold))
-                    .foregroundStyle(Signalwave.green)
-                TextField("host:7800", text: $receiver.host)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .font(Signalwave.mono(.body))
-                    .foregroundStyle(Signalwave.fg)
-                    .tint(Signalwave.green)
-                Button {
-                    Task { await receiver.testConnection() }
-                } label: {
-                    Label("test", systemImage: "dot.radiowaves.left.and.right")
-                }
-                .buttonStyle(.signalGhost)
-                .disabled(receiver.isTesting || !receiver.isConfigured)
-            }
-            .signalField()
-
-            if let message = receiver.connectionMessage {
-                Label {
-                    Text(message)
-                } icon: {
-                    Image(systemName: receiver.connectionOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                }
-                .font(Signalwave.mono(.caption2))
-                .foregroundStyle(receiver.connectionOK ? Signalwave.green : Signalwave.amber)
-            }
+            // The one status element shared verbatim with both AUv3 extensions:
+            // discovered IP, connection status, daemon capabilities + version.
+            DaemonStatusView()
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)

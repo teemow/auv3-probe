@@ -108,6 +108,14 @@ streams PCM + features to `mcp-midi-controller`). The sources live in
 the audio-stream wire contract are in
 [docs/auv3-extension.md](docs/auv3-extension.md).
 
+Hosted inside AUM the brain can reach almost AUM's **entire** control surface over
+MIDI — what it can read and change is measured in
+[docs/aum-control-surface.md](docs/aum-control-surface.md). That power is only as
+good as the loaded session, so the larger vision (deep session understanding + a
+**standard MIDI-control mapping** so the brain can change scenes) lives in the
+orchestrator repo:
+[mcp-midi-controller / aum-brain-control.md](https://github.com/teemow/mcp-midi-controller/blob/main/docs/aum-brain-control.md).
+
 ## Building (on a Mac)
 
 The repo is edited on Linux but built on macOS. The Xcode project is
