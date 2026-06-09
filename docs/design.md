@@ -296,8 +296,8 @@ this), shared by both build systems:
 | `Sources/AUv3ProbeApp/RootView.swift` | App shell: shared daemon-host bar + `TabView` (audio units \| AUM sessions); owns and injects the `Receiver`. |
 | **Audio units (job 1)** | |
 | `Sources/AUv3ProbeApp/AudioUnitScanner.swift` | AUv3 enumeration + `AUParameterTree` → `AudioUnitDetails` mapping (`discover()` / `readDetails(_:)`); `DiscoveredAudioUnit`; `AudioUnitError`. |
-| `Sources/AUv3ProbeApp/AudioUnitsModel.swift` | `ObservableObject` state + orchestration (discover, read single/batch, send, inspect, export); `AudioUnitRowStatus`; `AudioUnitDetailsDocument` for Save-to-Files. |
-| `Sources/AUv3ProbeApp/AudioUnitsView.swift` | The audio-units **signalwave** console: header + rescan, inline filter, a capture-style multi-select list with split arm/inspect tap targets, a fixed bottom action bar (read & send + run summary), per-row Save-to-Files, and the inspector `.sheet`. |
+| `Sources/AUv3ProbeApp/AudioUnitsModel.swift` | `ObservableObject` state + orchestration (discover, auto-sync read+send of every unit once per discovered host, manual resync, inspect); `AudioUnitRowStatus`. |
+| `Sources/AUv3ProbeApp/AudioUnitsView.swift` | The audio-units **signalwave** console: header + resync, inline filter, a capture-style list showing each unit's live sync state (no select/read step — units sync automatically on discovery), a bottom status bar (sync state + run summary), and the inspector `.sheet`. |
 | `Sources/AUv3ProbeApp/AudioUnitInspectorView.swift` | The tap-to-inspect overlay rendering one `AudioUnitDetails` (header, summary, privacy note, group-sectioned lazy parameter list, presets, raw JSON). |
 | **AUM sessions (job 2)** | |
 | `Sources/AUv3ProbeApp/BinaryPlist.swift` / `AUMSessionParser.swift` | On-device read-only NSKeyedArchiver binary-plist decoder + the `.aumproj` → `AUMSessionMap` parser. |

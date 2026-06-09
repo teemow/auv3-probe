@@ -157,14 +157,21 @@ this assumes (Swift toolchain ⇄ SDK version matching, `xtool sdk install`,
 ## Running against the receiver
 
 1. Start `cmd/auv3-probe` from the main repo on a host on the same LAN; it binds
-   `:7800` by default.
+   `:7800` by default and advertises itself over Bonjour (`_mcpmidi._tcp`).
 2. Launch this app on the iPad. iOS will prompt for **local network** access —
    allow it (the app POSTs over the LAN).
-3. Enter the receiver's `host:port` in the app (it is **not** committed anywhere
-   — you type it at runtime), tap **Test connection** (hits `/healthz`).
-4. Select the audio units to read and tap **Read & Send**. Each record is POSTed
-   to `/auv3-probe`. If the receiver is unreachable, use **Save to Files** to
-   export the JSON for manual transfer.
+3. The app **auto-discovers** the receiver over Bonjour — no host to type. The
+   shared status bar shows `searching → discovered → connected` with the
+   daemon's version and capabilities. If mDNS is blocked on the network, tap the
+   slider icon in the status bar and enter a `host:port` (or just a host — it
+   defaults to `:7800`) as a **manual** fallback. The host is never committed to
+   git; the manual override is stored on-device only.
+4. That's it — there is no select/read step. The moment the receiver is
+   reachable the app **auto-syncs**: it reads every installed unit and POSTs
+   each record to `/auv3-probe`, then POSTs a scan report. The audio-units tab
+   is a status console showing each unit's live sync state; tap a unit to
+   inspect what was measured. **resync** (top-right) re-scans for newly
+   installed plugins and pushes again.
 
 ## Reading AUM sessions
 
@@ -197,8 +204,8 @@ path. The bookmark is stored on-device only.
 
 ### Optional: the mcp-midi-controller ferry
 
-When an `mcp-midi-controller host:port` is set in the top bar (and **Test
-connection** passes), an optional ferry appears:
+Once `mcp-midi-controller` is discovered on the LAN (or set manually from the
+status bar), an optional ferry appears:
 
 - **Upload** device sessions to mcp-midi-controller (`POST /aum-session`, verbatim
   bytes) — per file or **upload all** from the linked folder.

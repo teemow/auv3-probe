@@ -135,8 +135,12 @@ enum AudioUnitScanner {
         let shortName = auUnit.audioUnitShortName
 
         let channelCaps = (auUnit.channelCapabilities ?? []).map { Int(truncating: $0) }
-        let latency = auUnit.latency
-        let tailTime = auUnit.tailTime
+        // Some effects (feedback/drone-capable filters like Cascade) report an
+        // infinite or NaN tailTime/latency. Those are not real measurements and,
+        // crucially, cannot cross the JSON wire as numbers — drop anything
+        // non-finite so the receiver only ever sees a finite float64.
+        let latency = auUnit.latency.isFinite ? auUnit.latency : 0
+        let tailTime = auUnit.tailTime.isFinite ? auUnit.tailTime : 0
 
         // Archive the icon captured at discovery, the way AUM stores it, so the
         // daemon can graft it verbatim into an authored node.

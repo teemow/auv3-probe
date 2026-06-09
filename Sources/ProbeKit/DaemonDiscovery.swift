@@ -40,13 +40,18 @@ public final class DaemonDiscovery: ObservableObject, @unchecked Sendable {
         public var version: String?
         /// Daemon capabilities from the TXT record (or healthz).
         public var capabilities: [String]
+        /// True when `host` is a user-typed override rather than a Bonjour
+        /// discovery (the fallback for networks where mDNS is blocked).
+        public var manual: Bool
 
         public init(host: String? = nil, reachable: Bool = false,
-                    version: String? = nil, capabilities: [String] = []) {
+                    version: String? = nil, capabilities: [String] = [],
+                    manual: Bool = false) {
             self.host = host
             self.reachable = reachable
             self.version = version
             self.capabilities = capabilities
+            self.manual = manual
         }
 
         /// True once a daemon has been found on the network.
@@ -56,9 +61,22 @@ public final class DaemonDiscovery: ObservableObject, @unchecked Sendable {
     /// Observed by SwiftUI (always mutated on the main actor).
     @Published public private(set) var status = Status()
 
+    /// UserDefaults key for the persisted manual host override.
+    private static let manualKey = "com.teemow.auv3probe.manualHost"
+
     /// Thread-safe `host:port` for the networking clients' reconnect loops.
     private let hostBox = OSAllocatedUnfairLockBox<String?>(nil)
-    public var currentHost: String? { hostBox.value }
+    /// A user-typed `host:port` override that wins over Bonjour discovery, for
+    /// LANs where mDNS is blocked. Persisted so it survives relaunch.
+    private let manualBox = OSAllocatedUnfairLockBox<String?>(
+        UserDefaults.standard.string(forKey: DaemonDiscovery.manualKey))
+
+    /// The effective host every client and HTTP flow uses: the manual override
+    /// when set, otherwise the auto-discovered address.
+    public var currentHost: String? { manualBox.value ?? hostBox.value }
+
+    /// The raw manual override (`host:port`), or nil when relying on discovery.
+    public var manualHost: String? { manualBox.value }
 
     private let queue = DispatchQueue(label: "com.teemow.auv3probe.discovery")
     private var browser: NWBrowser?
@@ -73,6 +91,9 @@ public final class DaemonDiscovery: ObservableObject, @unchecked Sendable {
     // touch on main, so we keep our own copy here for the guard + streak).
     private var lastReachable = false
     private var unreachableStreak = 0
+    // At most one health poll in flight: if a `healthz()` runs longer than the
+    // poll interval, the next tick is skipped rather than stacking requests.
+    private var healthInFlight = false
     /// Consecutive failed health polls (~5s each) before a discovered-but-
     /// unreachable host is treated as stale and re-resolved.
     private static let maxUnreachableBeforeReResolve = 3
@@ -86,7 +107,53 @@ public final class DaemonDiscovery: ObservableObject, @unchecked Sendable {
             started = true
             startBrowserLocked()
             startHealthPollLocked()
+            // Surface a persisted manual override immediately on launch.
+            if manualBox.value != nil {
+                publishLocked(hostOverride: hostBox.value)
+            }
         }
+    }
+
+    // MARK: - Manual host override (mDNS-blocked fallback)
+
+    /// Set (or clear, with nil/empty) the manual `host:port` override. Persists
+    /// across launches, takes precedence over discovery while set, and triggers
+    /// an immediate reachability check so the UI reflects it at once.
+    public func setManualHost(_ raw: String?) {
+        let normalized = Self.normalizeManual(raw)
+        queue.async { [self] in
+            manualBox.value = normalized
+            if let normalized {
+                UserDefaults.standard.set(normalized, forKey: Self.manualKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.manualKey)
+                // Re-browse so discovery can re-resolve a fresh address now that
+                // nothing is overriding it (browse results may not change again).
+                restartBrowserLocked()
+            }
+            unreachableStreak = 0
+            lastReachable = false
+            publishLocked(hostOverride: hostBox.value, reachable: false)
+            pollHealth()
+        }
+    }
+
+    /// Normalize a typed host into `host:port`: trim, drop any `http(s)://`
+    /// scheme and trailing slash, and default the port to the daemon's `:7800`
+    /// when none is given. Returns nil for empty input.
+    static func normalizeManual(_ raw: String?) -> String? {
+        guard var s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else {
+            return nil
+        }
+        if let range = s.range(of: "://") { s = String(s[range.upperBound...]) }
+        if s.hasSuffix("/") { s.removeLast() }
+        if s.isEmpty { return nil }
+        // Bracketed IPv6 (`[::1]` or `[::1]:7800`) — only add a port if absent.
+        if s.hasPrefix("[") {
+            return s.contains("]:") ? s : "\(s):7800"
+        }
+        // Plain host / IPv4: a single colon means a port is present.
+        return s.contains(":") ? s : "\(s):7800"
     }
 
     // MARK: - Browsing
@@ -221,25 +288,27 @@ public final class DaemonDiscovery: ObservableObject, @unchecked Sendable {
     }
 
     private func pollHealth() {
+        guard !healthInFlight else { return }
         guard let host = currentHost, let client = DaemonClient(host: host) else {
             updateReachable(false)
             return
         }
+        healthInFlight = true
         Task { [weak self] in
-            do {
-                try await client.healthz()
-                self?.updateReachable(true)
-            } catch {
-                self?.updateReachable(false)
-            }
+            let reachable = (try? await client.healthz()) != nil
+            self?.updateReachable(reachable)
         }
     }
 
     private func updateReachable(_ reachable: Bool) {
         queue.async { [self] in
+            healthInFlight = false
             if reachable {
                 unreachableStreak = 0
-            } else if currentHost != nil {
+            } else if manualBox.value == nil && currentHost != nil {
+                // Only re-resolve discovered hosts. A manual override is the
+                // user's deliberate choice — leave it pinned even when
+                // unreachable so the UI keeps showing it (and keeps polling).
                 unreachableStreak += 1
                 if unreachableStreak >= Self.maxUnreachableBeforeReResolve {
                     // A discovered host that stays unreachable is most likely
@@ -263,15 +332,20 @@ public final class DaemonDiscovery: ObservableObject, @unchecked Sendable {
     /// `reachable` defaults to the last known value so metadata refreshes don't
     /// clobber it. Must be called on `queue`.
     private func publishLocked(hostOverride: String?, reachable: Bool? = nil) {
-        let version = txtVersion
-        let caps = txtCapabilities
-        let host = hostOverride
+        let manual = manualBox.value
+        // A manual override wins over the discovered address; its TXT metadata
+        // is unknown (we didn't browse it), so present it without caps/version.
+        let host = manual ?? hostOverride
+        let version = manual == nil ? txtVersion : nil
+        let caps = manual == nil ? txtCapabilities : []
+        let isManual = manual != nil
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             var next = self.status
             next.host = host
             next.version = version
             next.capabilities = caps
+            next.manual = isManual
             if let reachable = reachable { next.reachable = reachable }
             if host == nil { next.reachable = false }
             if next != self.status { self.status = next }

@@ -46,7 +46,6 @@ public struct ProbeAudioTapView: View {
                 header
                 DaemonStatusView()
                 meterPanel
-                targetPanel
                 streamPanel
             }
             .padding(10)
@@ -108,22 +107,6 @@ public struct ProbeAudioTapView: View {
         }
     }
 
-    // MARK: - Target
-
-    private var targetPanel: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionHeader("stream options")
-            Text("// streams to the auto-discovered daemon")
-                .font(Signalwave.mono(.caption2))
-                .foregroundStyle(Signalwave.dim)
-            Text("// full-rate · interleaved · native channels")
-                .font(Signalwave.mono(.caption2))
-                .foregroundStyle(Signalwave.dim)
-        }
-        .padding(8)
-        .signalField()
-    }
-
     // MARK: - Stream control
 
     private var streamPanel: some View {
@@ -136,6 +119,10 @@ public struct ProbeAudioTapView: View {
                 Text(model.config.streaming ? "stop streaming" : "start streaming")
             }
             .buttonStyle(.signalPrimary)
+            Text("// full-rate · interleaved · native channels → auto-discovered daemon")
+                .font(Signalwave.mono(.caption2))
+                .foregroundStyle(Signalwave.dim)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(8)
         .signalField()

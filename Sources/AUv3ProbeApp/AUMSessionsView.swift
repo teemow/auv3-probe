@@ -64,9 +64,7 @@ struct AUMSessionsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     folderSection
-                    if receiver.isConfigured {
-                        daemonSection
-                    }
+                    daemonSection
                 }
                 .padding(16)
                 .padding(.bottom, 8)
@@ -156,20 +154,29 @@ struct AUMSessionsView: View {
                 subfolderFilterBar
                 deviceFilesList
             } else {
-                Button {
-                    linkFolder()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "folder.badge.plus")
-                        Text("link aum folder")
+                HStack(spacing: 8) {
+                    Button {
+                        linkFolder()
+                    } label: {
+                        Label("link aum folder", systemImage: "folder.badge.plus")
                     }
-                }
-                .buttonStyle(.signalGhost)
+                    .buttonStyle(.signalGhost)
 
-                Text("// “link aum folder” remembers aum's folder and lists every session here for one-tap inspect (and, with a host, upload). “open file” (top-right) is a one-off: pick a single .aumproj/.aum_midimap to inspect, nothing is remembered.")
-                    .font(Signalwave.mono(.caption2))
-                    .foregroundStyle(Signalwave.dim)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        pickFile()
+                    } label: {
+                        Label("open one file", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.signalGhost)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("// link — remember aum's folder: lists every session for one-tap inspect, upload & write-back.")
+                    Text("// open one file — a one-off: inspect a single .aumproj/.aum_midimap, nothing is remembered.")
+                }
+                .font(Signalwave.mono(.caption2))
+                .foregroundStyle(Signalwave.dim)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             if let summary = model.uploadSummary { uploadSummaryCard(summary) }
@@ -411,7 +418,22 @@ struct AUMSessionsView: View {
 
     // MARK: - Daemon ferry (optional; only with a host)
 
+    @ViewBuilder
     private var daemonSection: some View {
+        if receiver.isConfigured {
+            daemonFerry
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionHeader("mcp-midi-controller")
+                Text("// waiting for mcp-midi-controller on the lan… upload / pull-back appears here once it is discovered. set a host manually from the bar above if mdns is blocked.")
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var daemonFerry: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 SectionHeader("mcp-midi-controller")
@@ -519,42 +541,46 @@ struct AUMSessionsView: View {
                     .controlSize(.small)
                     .tint(Signalwave.green)
             } else {
-                HStack(spacing: 16) {
+                // One labeled menu instead of three icon-only buttons (two of
+                // which used to change meaning with the folder-link state). Each
+                // action now reads as plain text, so nothing is ambiguous.
+                Menu {
                     if folder.isBound && !entry.isMidiMap {
                         Button {
                             Task { await model.pushAndOpen(entry, client: receiver.client, folder: folder) }
                         } label: {
-                            Image(systemName: "play.circle")
-                                .foregroundStyle(Signalwave.green)
+                            Label("push into aum & open", systemImage: "play.circle")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("push \(entry.filename) into aum and open it")
                     }
 
-                    Button {
-                        if folder.isBound {
+                    if folder.isBound {
+                        Button {
                             destinationFor = entry
-                        } else {
-                            Task { await model.download(entry, client: receiver.client, folder: folder) }
+                        } label: {
+                            Label("save into aum folder…", systemImage: "square.and.arrow.down")
                         }
-                    } label: {
-                        Image(systemName: folder.isBound ? "square.and.arrow.down" : "square.and.arrow.up")
-                            .foregroundStyle(Signalwave.green)
+                    } else {
+                        Button {
+                            Task { await model.download(entry, client: receiver.client, folder: folder) }
+                        } label: {
+                            Label("share to open in aum", systemImage: "square.and.arrow.up")
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(folder.isBound
-                        ? "choose a folder to save \(entry.filename) into aum"
-                        : "share \(entry.filename) to open in aum")
 
-                    Button {
+                    Divider()
+
+                    Button(role: .destructive) {
                         Task { await model.deleteEntry(entry, client: receiver.client) }
                     } label: {
-                        Image(systemName: "trash")
-                            .foregroundStyle(Signalwave.amber)
+                        Label("delete from mcp-midi-controller", systemImage: "trash")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("delete \(entry.filename) from mcp-midi-controller")
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(Signalwave.green)
+                        .padding(.leading, 4)
                 }
+                .tint(Signalwave.green)
+                .accessibilityLabel("actions for \(entry.filename)")
             }
         }
         .padding(12)

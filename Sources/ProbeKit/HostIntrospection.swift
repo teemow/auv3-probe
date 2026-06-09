@@ -32,8 +32,6 @@ import UIKit
 // collectors below are pure reads, safe to call off the render thread (from the
 // reporter timer / UI); the sanctioned fields are merged in by the reporter from
 // the render-thread snapshot.
-//
-// `HostIntrospection` remains as a source-compatible alias for the older name.
 public struct HostDiagnostics: Codable, Sendable, Equatable {
     /// os_log channel for the whole probe (subsystem shared with idevicesyslog).
     public static let log = Logger(subsystem: "com.teemow.auv3probe", category: "introspection")
@@ -398,9 +396,6 @@ public struct HostDiagnostics: Codable, Sendable, Equatable {
     }
 }
 
-/// Source-compatible alias for the previous name of the envelope.
-public typealias HostIntrospection = HostDiagnostics
-
 // MARK: - Collectors
 
 /// Reads the off-thread diagnostic surfaces (AU identity/capabilities, MIDI
@@ -681,6 +676,3 @@ public enum HostDiagnosticsCollector {
         }
     }
 }
-
-/// Source-compatible alias for the previous name of the collector.
-public typealias HostIntrospectionCollector = HostDiagnosticsCollector

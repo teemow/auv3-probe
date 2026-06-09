@@ -82,8 +82,8 @@ final class BrainEngine: @unchecked Sendable {
     // thread. Written via a non-blocking try-lock so the render thread never
     // blocks on the UI/report reader.
     private struct HostState {
-        var transport = HostIntrospection.Transport()
-        var musicalContext = HostIntrospection.MusicalContext()
+        var transport = HostDiagnostics.Transport()
+        var musicalContext = HostDiagnostics.MusicalContext()
     }
     private let hostState = OSAllocatedUnfairLock(initialState: HostState())
 
@@ -130,8 +130,8 @@ final class BrainEngine: @unchecked Sendable {
     /// The latest sanctioned host readback, for the introspection report. Read
     /// off the render thread (UI/report timer); the render thread writes it via a
     /// non-blocking try-lock.
-    func hostSnapshot() -> (transport: HostIntrospection.Transport,
-                            musicalContext: HostIntrospection.MusicalContext) {
+    func hostSnapshot() -> (transport: HostDiagnostics.Transport,
+                            musicalContext: HostDiagnostics.MusicalContext) {
         hostState.withLock { ($0.transport, $0.musicalContext) }
     }
 
@@ -178,61 +178,31 @@ final class BrainEngine: @unchecked Sendable {
             // exactly once per cycle).
             self.captureHostState()
 
-            // 2) Evaluate footswitch input + section boundaries under a
-            // non-blocking try-lock. If the UI thread is mid-edit we skip
-            // evaluation this cycle (harmless for MIDI, never blocks audio). All
-            // work happens *inside* the closure so the program is never copied
-            // out (no array retains on the audio thread); arrays are read by
-            // index. handleMIDI also records every inbound event into the
-            // observed-MIDI ring.
+            // 2) Record EVERY inbound event (legacy MIDI 1.0, UMP, and parameter
+            // automation) into the observed-MIDI ring for the host control-surface
+            // analysis. Done outside the program lock so a UI mid-edit never drops
+            // an observation.
+            self.observeEvents(eventListHead, at: sampleTime)
+
+            // 3) Match footswitch input + evaluate section boundaries under a
+            // non-blocking try-lock. If the UI thread is mid-edit we simply skip
+            // this cycle (harmless for MIDI, never blocks audio). All work happens
+            // *inside* the closure, reading the program arrays by index so nothing
+            // is retained on the audio thread. The RenderInputs wrapper carries the
+            // non-Sendable event pointer into the @Sendable lock closure (used
+            // synchronously only). Footswitches match on the legacy channel-voice
+            // path; UMP/parameter events are observe-only (handled in step 2).
             let inputs = RenderInputs(events: eventListHead, sampleTime: sampleTime)
-            let evaluated: Bool? = self.program.withLockIfAvailable { prog in
+            _ = self.program.withLockIfAvailable { prog in
                 var event = inputs.events
                 while let raw = event {
                     let head = raw.pointee.head
-                    switch head.eventType {
-                    case .MIDI:
-                        // Legacy MIDI 1.0: observe + run the footswitch matcher.
-                        self.handleMIDI(raw.pointee.MIDI, program: &prog, at: inputs.sampleTime)
-                    case .midiEventList:
-                        // MIDI-2.0-capable UMP path (observe only — footswitches
-                        // are matched on the legacy channel-voice path).
-                        self.observeUMP(raw, at: inputs.sampleTime)
-                    case .parameter, .parameterRamp:
-                        // Host parameter automation driving this AU.
-                        self.observeParameter(raw.pointee.parameter,
-                                               ramp: head.eventType == .parameterRamp,
-                                               at: inputs.sampleTime)
-                    default:
-                        break
+                    if head.eventType == .MIDI {
+                        self.matchFootswitch(raw.pointee.MIDI, program: &prog, at: inputs.sampleTime)
                     }
                     event = UnsafePointer(head.next)
                 }
                 self.evaluateTransport(program: &prog, at: inputs.sampleTime)
-                return true
-            }
-
-            // 3) If the program lock was unavailable (UI mid-edit) we skipped the
-            // walk above — but the analysis must still see EVERY inbound event, so
-            // capture them here without touching the program.
-            if evaluated == nil {
-                var event = inputs.events
-                while let raw = event {
-                    let head = raw.pointee.head
-                    switch head.eventType {
-                    case .MIDI:
-                        self.observe(raw.pointee.MIDI, at: inputs.sampleTime)
-                    case .midiEventList:
-                        self.observeUMP(raw, at: inputs.sampleTime)
-                    case .parameter, .parameterRamp:
-                        self.observeParameter(raw.pointee.parameter,
-                                               ramp: head.eventType == .parameterRamp,
-                                               at: inputs.sampleTime)
-                    default:
-                        break
-                    }
-                    event = UnsafePointer(head.next)
-                }
             }
 
             return noErr
@@ -254,8 +224,7 @@ final class BrainEngine: @unchecked Sendable {
         var emitted = 0
         while commandRing.pop(into: &scratchCommand) {
             let cmd = scratchCommand
-            var out = (UInt8(0), UInt8(0), UInt8(0))
-            let length: Int = withUnsafeMutablePointer(to: &out.0) { ptr in
+            emit(via: midiOut, at: sampleTime) { ptr in
                 switch cmd.kind {
                 case .noteOn:
                     return MidiEncoder.noteOn(channel: Int(cmd.channel), note: Int(cmd.data1), velocity: Int(cmd.data2), into: ptr)
@@ -273,9 +242,6 @@ final class BrainEngine: @unchecked Sendable {
                     return MidiEncoder.transport(.continue, into: ptr)
                 }
             }
-            _ = withUnsafePointer(to: &out.0) { ptr in
-                midiOut(AUEventSampleTime(sampleTime), 0, length, ptr)
-            }
             emitted += 1
         }
         if emitted > 0 {
@@ -283,7 +249,46 @@ final class BrainEngine: @unchecked Sendable {
         }
     }
 
+    /// Emit one MIDI 1.0 message via the host's `midiOut` block. `encode` writes
+    /// the bytes into the provided stack buffer and returns the byte count.
+    /// Realtime-safe: the buffer is a 3-byte stack tuple (no allocation), the
+    /// `encode` closure is non-escaping (no heap), and `midiOut` is the host's
+    /// realtime block. Called only on the render thread (drainCommands/emitScene).
+    private func emit(via midiOut: AUMIDIOutputEventBlock, at sampleTime: Double,
+                      encode: (UnsafeMutablePointer<UInt8>) -> Int) {
+        var out = (UInt8(0), UInt8(0), UInt8(0))
+        withUnsafeMutablePointer(to: &out.0) { ptr in
+            let length = encode(ptr)
+            _ = midiOut(AUEventSampleTime(sampleTime), 0, length, ptr)
+        }
+    }
+
     // MARK: - MIDI in (capture + footswitch)
+
+    /// Walk the inbound render-event list and record every event into the
+    /// observed-MIDI ring — legacy MIDI 1.0, UMP (MIDI-2.0-capable) packets, and
+    /// host parameter automation. Pure capture: no footswitch matching and no
+    /// program access, so it is safe to run whether or not the program lock could
+    /// be acquired. Realtime-safe (each push is wait-free and allocation-free).
+    private func observeEvents(_ head: UnsafePointer<AURenderEvent>?, at sampleTime: Double) {
+        var event = head
+        while let raw = event {
+            let eventHead = raw.pointee.head
+            switch eventHead.eventType {
+            case .MIDI:
+                observe(raw.pointee.MIDI, at: sampleTime)
+            case .midiEventList:
+                observeUMP(raw, at: sampleTime)
+            case .parameter, .parameterRamp:
+                observeParameter(raw.pointee.parameter,
+                                 ramp: eventHead.eventType == .parameterRamp,
+                                 at: sampleTime)
+            default:
+                break
+            }
+            event = UnsafePointer(eventHead.next)
+        }
+    }
 
     /// Record one inbound event into the observed-MIDI ring. Captures EVERYTHING
     /// (channel voice, system-realtime, sysex leaders) so the analysis can
@@ -343,12 +348,11 @@ final class BrainEngine: @unchecked Sendable {
         ))
     }
 
-    private func handleMIDI(_ midi: AUMIDIEvent, program prog: inout RenderProgram, at sampleTime: Double) {
-        // Capture every inbound event first (incl. clock/transport/sysex that the
-        // footswitch matcher below ignores) for the host control-surface analysis.
-        observe(midi, at: sampleTime)
-
-        // AUMIDIEvent.data is a fixed 3-byte tuple; read only `length` bytes.
+    /// Match one legacy MIDI 1.0 event against the program's footswitch mappings
+    /// and apply any that fire. Observation happens separately in `observeEvents`
+    /// (every cycle, outside the lock); this runs only when the program lock is
+    /// held. `AUMIDIEvent.data` is a fixed 3-byte tuple; only `length` bytes count.
+    private func matchFootswitch(_ midi: AUMIDIEvent, program prog: inout RenderProgram, at sampleTime: Double) {
         let length = Int(midi.length)
         guard length >= 1 else { return }
         var bytes = midi.data
@@ -411,7 +415,7 @@ final class BrainEngine: @unchecked Sendable {
     /// statusPlaying for the UI, (c) the carry-over evaluateTransport consumes.
     /// Called on the render thread, outside the program lock.
     private func captureHostState() {
-        var transport = HostIntrospection.Transport()
+        var transport = HostDiagnostics.Transport()
         if let transportState = transportState {
             var flags = AUHostTransportStateFlags(rawValue: 0)
             var samplePosition: Double = 0
@@ -428,7 +432,7 @@ final class BrainEngine: @unchecked Sendable {
             }
         }
 
-        var context = HostIntrospection.MusicalContext()
+        var context = HostDiagnostics.MusicalContext()
         if let musicalContext = musicalContext {
             var tempo: Double = 0
             var tsNumerator: Double = 0
@@ -489,17 +493,16 @@ final class BrainEngine: @unchecked Sendable {
         }
         lastEmittedScene = scene
 
-        var out = (UInt8(0), UInt8(0), UInt8(0))
-        let length: Int = withUnsafeMutablePointer(to: &out.0) { ptr in
-            switch prog.mode {
+        let mode = prog.mode
+        let outputChannel = prog.outputChannel
+        let sceneCC = prog.sceneCC
+        emit(via: midiOut, at: sampleTime) { ptr in
+            switch mode {
             case .programChange:
-                return MidiEncoder.programChange(channel: prog.outputChannel, program: scene, into: ptr)
+                return MidiEncoder.programChange(channel: outputChannel, program: scene, into: ptr)
             case .controlChange:
-                return MidiEncoder.controlChange(channel: prog.outputChannel, cc: prog.sceneCC, value: scene, into: ptr)
+                return MidiEncoder.controlChange(channel: outputChannel, cc: sceneCC, value: scene, into: ptr)
             }
-        }
-        _ = withUnsafePointer(to: &out.0) { ptr in
-            midiOut(AUEventSampleTime(sampleTime), 0, length, ptr)
         }
         statusScene.store(scene, ordering: .relaxed)
         statusEmitCount.wrappingIncrement(ordering: .relaxed)

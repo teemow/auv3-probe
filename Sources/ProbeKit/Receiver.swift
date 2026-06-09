@@ -27,6 +27,14 @@ public final class Receiver: ObservableObject {
     /// True once a daemon has been discovered on the LAN.
     public var isConfigured: Bool { discovery.currentHost != nil }
 
+    /// The discovered (or manually set) `host:port`, or nil while searching.
+    /// Drives the auto-sync trigger: a new host means a fresh sync.
+    public var host: String? { discovery.currentHost }
+
+    /// True once `GET /healthz` has confirmed the daemon is actually reachable —
+    /// the signal the audio-units tab uses to auto-sync.
+    public var isReachable: Bool { discovery.status.reachable }
+
     /// A client for the discovered daemon, or nil while still searching.
     public var client: DaemonClient? {
         discovery.currentHost.flatMap { DaemonClient(host: $0) }
