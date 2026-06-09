@@ -24,6 +24,8 @@ import ProbeKit
 final class BrainController {
     private let ring: MidiCommandRing
     private let socket: ReconnectingWebSocket
+    // Reused across frames (decoding runs only on the socket's serial queue).
+    private let decoder = JSONDecoder()
 
     init(ring: MidiCommandRing) {
         self.ring = ring
@@ -49,7 +51,7 @@ final class BrainController {
         @unknown default:
             return
         }
-        guard let frame = try? JSONDecoder().decode(CommandFrame.self, from: data),
+        guard let frame = try? decoder.decode(CommandFrame.self, from: data),
               let cmd = frame.toMidiCommand() else {
             return
         }
@@ -98,6 +100,6 @@ private struct CommandFrame: Decodable {
     }
 
     private func byte(_ v: Int?) -> UInt8 {
-        UInt8(clamping: max(0, min(127, v ?? 0)))
+        UInt8(min(127, max(0, v ?? 0)))
     }
 }

@@ -17,7 +17,7 @@ final class BrainViewModel: ObservableObject {
     /// view-independent `HostDiagnosticsReporter`. The panel no longer drives
     /// capture (which used to die whenever the UI closed) — it just reflects the
     /// reporter's `latest` on each poll tick.
-    @Published var introspection: HostIntrospection?
+    @Published var introspection: HostDiagnostics?
     private var timer: Timer?
 
     init(audioUnit: ProbeMidiBrainAU) {
@@ -112,6 +112,11 @@ final class BrainViewModel: ObservableObject {
 public struct ProbeMidiBrainView: View {
     @ObservedObject var model: BrainViewModel
 
+    /// Diagnostics (host introspection / observed MIDI / dev backdoor) are
+    /// monitoring, not authoring — collapsed by default and parked below the
+    /// editable panels so the things you actually tune are at the top.
+    @State private var showDiagnostics = false
+
     init(model: BrainViewModel) {
         self.model = model
     }
@@ -122,14 +127,10 @@ public struct ProbeMidiBrainView: View {
                 header
                 DaemonStatusView()
                 statusPanel
-                introspectionPanel
-                observedPanel
-#if DEBUG
-                backdoorPanel
-#endif
                 sectionsPanel
                 footswitchPanel
                 outputPanel
+                diagnosticsSection
             }
             .padding(16)
         }
@@ -137,6 +138,34 @@ public struct ProbeMidiBrainView: View {
         .tint(Signalwave.green)
         .preferredColorScheme(.dark)
         .onChange(of: model.program) { _ in model.commit() }
+    }
+
+    // MARK: - Diagnostics (collapsible, monitoring only)
+
+    private var diagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.12)) { showDiagnostics.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: showDiagnostics ? "chevron.down" : "chevron.right")
+                    SectionHeader("diagnostics")
+                    Spacer()
+                    Text(showDiagnostics ? "hide" : "show")
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if showDiagnostics {
+                introspectionPanel
+                observedPanel
+#if DEBUG
+                backdoorPanel
+#endif
+            }
+        }
     }
 
     private var header: some View {
@@ -224,7 +253,7 @@ public struct ProbeMidiBrainView: View {
         .signalField()
     }
 
-    private func endpointLabel(_ endpoint: HostIntrospection.CoreMIDISnapshot.Endpoint) -> String {
+    private func endpointLabel(_ endpoint: HostDiagnostics.CoreMIDISnapshot.Endpoint) -> String {
         let primary = endpoint.displayName.isEmpty ? endpoint.name : endpoint.displayName
         return endpoint.device.isEmpty ? primary : "\(endpoint.device) · \(primary)"
     }
@@ -475,9 +504,15 @@ public struct ProbeMidiBrainView: View {
             Text(label)
                 .font(Signalwave.mono(.caption))
                 .foregroundStyle(Signalwave.dim)
-            Text(String(format: "%g", value.wrappedValue))
+            // Direct numeric entry — wide ranges like beat (0…100000) are
+            // impractical to reach by tapping a stepper.
+            TextField("", value: clamped(value, to: range), format: .number)
+                .keyboardType(.decimalPad)
+                .multilineTextAlignment(.trailing)
                 .font(Signalwave.mono(.body))
                 .foregroundStyle(Signalwave.fg)
+                .tint(Signalwave.green)
+                .frame(maxWidth: 96)
             Stepper("", value: value, in: range, step: step)
                 .labelsHidden()
                 .tint(Signalwave.green)
@@ -489,12 +524,32 @@ public struct ProbeMidiBrainView: View {
             Text(label)
                 .font(Signalwave.mono(.caption))
                 .foregroundStyle(Signalwave.dim)
-            Text("\(value.wrappedValue)")
+            TextField("", value: clamped(value, to: range), format: .number)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
                 .font(Signalwave.mono(.body))
                 .foregroundStyle(Signalwave.fg)
+                .tint(Signalwave.green)
+                .frame(maxWidth: 72)
             Stepper("", value: value, in: range)
                 .labelsHidden()
                 .tint(Signalwave.green)
         }
+    }
+
+    // MARK: - Clamping bindings (typed values stay within the valid range)
+
+    private func clamped(_ binding: Binding<Double>, to range: ClosedRange<Double>) -> Binding<Double> {
+        Binding(
+            get: { binding.wrappedValue },
+            set: { binding.wrappedValue = min(max($0, range.lowerBound), range.upperBound) }
+        )
+    }
+
+    private func clamped(_ binding: Binding<Int>, to range: ClosedRange<Int>) -> Binding<Int> {
+        Binding(
+            get: { binding.wrappedValue },
+            set: { binding.wrappedValue = min(max($0, range.lowerBound), range.upperBound) }
+        )
     }
 }

@@ -189,16 +189,44 @@ public struct AudioUnitDetails: Codable, Equatable {
     }
 
     /// Encodes the details to stable, pretty JSON. `.sortedKeys` guarantees a
-    /// deterministic ordering so the output diffs cleanly. `.convertToString` is
-    /// a defensive backstop — the scanner already replaces non-finite values
-    /// with finite sentinels, but this guarantees encoding never throws even if
-    /// one slips through.
+    /// deterministic ordering so the output diffs cleanly.
+    ///
+    /// Every numeric field is clamped finite first (`finiteClamped()`), because
+    /// the Go receiver decodes these into `float64` and rejects a JSON **string**
+    /// where it expects a number — emitting `"inf"`/`"nan"` (the old
+    /// `.convertToString` strategy) produces an HTTP 400, not a safe fallback.
+    /// With everything finite, `.throw` can stay as a hard backstop: a genuine
+    /// leak fails loudly on-device instead of silently shipping bad wire data.
     public func encoded() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.nonConformingFloatEncodingStrategy =
-            .convertToString(positiveInfinity: "inf", negativeInfinity: "-inf", nan: "nan")
-        return try encoder.encode(self)
+        encoder.nonConformingFloatEncodingStrategy = .throw
+        return try encoder.encode(finiteClamped())
+    }
+
+    /// A copy with every `Double` guaranteed finite: NaN → 0, ±∞ → the largest
+    /// finite `Float` magnitude (the same sentinels the scanner uses). The
+    /// scanner already does this for parameter min/max/value; this is a final,
+    /// schema-wide guarantee covering latency/tailTime and any future field.
+    private func finiteClamped() -> AudioUnitDetails {
+        var copy = self
+        copy.parameters = parameters.map { p in
+            var q = p
+            q.min = Self.clampFinite(p.min)
+            q.max = Self.clampFinite(p.max)
+            q.value = Self.clampFinite(p.value)
+            return q
+        }
+        if let l = latency, !l.isFinite { copy.latency = nil }
+        if let t = tailTime, !t.isFinite { copy.tailTime = nil }
+        return copy
+    }
+
+    private static func clampFinite(_ v: Double) -> Double {
+        if v.isNaN { return 0 }
+        if v == .infinity { return Double(Float.greatestFiniteMagnitude) }
+        if v == -.infinity { return -Double(Float.greatestFiniteMagnitude) }
+        return v
     }
 
     /// The sanitized id the daemon uses to name the staged `<id>.json` file

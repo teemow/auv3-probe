@@ -1,15 +1,14 @@
 import SwiftUI
-import UniformTypeIdentifiers
 import ProbeKit
 
 // The audio-units tab, rendered in the signalwave design language (see
 // docs/signalwave.md): a charcoal "sniffer console" that lists every installed
-// AUv3 like a packet capture, exposes the details (parameters/presets) each one
-// carries, and reads the armed rows from a fixed action bar.
+// AUv3 like a packet capture and shows the live sync state of each.
 //
-// The daemon host lives in the shared Receiver (top bar in RootView), so this
-// view reads it from the environment rather than owning a host field. UI chrome
-// is lowercased; raw data (unit names, FourCC codes, counts) is shown verbatim.
+// There is no select/read step. The moment the shared Receiver reports the
+// daemon reachable, every unit is read and POSTed automatically; the tab is a
+// status console plus a per-unit inspector. "resync" re-scans (picking up newly
+// installed plugins) and pushes again.
 
 struct AudioUnitsView: View {
     @EnvironmentObject private var receiver: Receiver
@@ -22,6 +21,13 @@ struct AudioUnitsView: View {
         return model.units.filter {
             $0.name.localizedCaseInsensitiveContains(q)
                 || $0.manufacturer.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    /// Units that have completed a sync (sent or empty).
+    private var syncedCount: Int {
+        model.units.reduce(0) { count, unit in
+            (model.statuses[unit.id]?.isDone ?? false) ? count + 1 : count
         }
     }
 
@@ -38,19 +44,27 @@ struct AudioUnitsView: View {
                 .padding(.bottom, 8)
             }
 
-            actionBar
+            statusBar
         }
         .background(Signalwave.bg.ignoresSafeArea())
-        .onAppear { if model.units.isEmpty { model.refresh() } }
-        .fileExporter(
-            isPresented: $model.isExporting,
-            document: model.exportDocument,
-            contentType: .json,
-            defaultFilename: model.exportFilename
-        ) { _ in }
+        .onAppear {
+            if model.units.isEmpty { model.refresh() }
+            triggerAutoSync()
+        }
+        .onChange(of: receiver.isReachable) { _ in triggerAutoSync() }
+        .onChange(of: receiver.host) { _ in triggerAutoSync() }
         .sheet(item: inspectedBinding) { item in
             AudioUnitInspectorView(details: item.details)
         }
+    }
+
+    /// Fire an auto-sync when the daemon is reachable. The model itself guards
+    /// against re-syncing the same host or overlapping runs.
+    private func triggerAutoSync() {
+        guard receiver.isReachable,
+              let client = receiver.client,
+              let host = receiver.host else { return }
+        Task { await model.autoSync(client: client, host: host) }
     }
 
     /// Bridges `model.inspectedID` to a `.sheet(item:)` binding by pairing it
@@ -73,7 +87,7 @@ struct AudioUnitsView: View {
                 Text("audio units")
                     .font(Signalwave.mono(.title3, weight: .bold))
                     .foregroundStyle(Signalwave.fg)
-                Text("auv3 · parameters & presets")
+                Text("auv3 · auto-synced to mcp-midi-controller")
                     .font(Signalwave.mono(.caption2))
                     .foregroundStyle(Signalwave.dim)
             }
@@ -81,9 +95,9 @@ struct AudioUnitsView: View {
             Spacer()
 
             Button {
-                model.refresh()
+                Task { await model.resync(client: receiver.client, host: receiver.host) }
             } label: {
-                Label("rescan", systemImage: "arrow.clockwise")
+                Label("resync", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.signalGhost)
             .disabled(model.isBusy)
@@ -99,15 +113,9 @@ struct AudioUnitsView: View {
             HStack(spacing: 8) {
                 SectionHeader("audio units")
                 Spacer()
-                Text("\(model.selected.count)/\(model.units.count)")
+                Text("\(syncedCount)/\(model.units.count) synced")
                     .font(Signalwave.mono(.footnote))
                     .foregroundStyle(Signalwave.dim)
-                Button("all") { model.selectAll() }
-                    .buttonStyle(.signalGhost)
-                    .disabled(model.units.isEmpty)
-                Button("none") { model.selectNone() }
-                    .buttonStyle(.signalGhost)
-                    .disabled(model.selected.isEmpty)
             }
 
             HStack(spacing: 8) {
@@ -163,7 +171,7 @@ struct AudioUnitsView: View {
             Text("// no auv3 audio units found")
                 .font(Signalwave.mono(.subheadline, weight: .semibold))
                 .foregroundStyle(Signalwave.fg)
-            Text("install auv3 instruments/effects, then rescan. third-party units need the inter-app audio entitlement.")
+            Text("install auv3 instruments/effects, then resync. third-party units need the inter-app audio entitlement.")
                 .font(Signalwave.mono(.caption))
                 .foregroundStyle(Signalwave.dim)
         }
@@ -178,75 +186,43 @@ struct AudioUnitsView: View {
     @ViewBuilder
     private func unitRow(_ unit: DiscoveredAudioUnit) -> some View {
         let status = model.statuses[unit.id] ?? .idle
-        let isSelected = model.selected.contains(unit.id)
 
-        HStack(alignment: .top, spacing: 12) {
-            Button {
-                model.toggle(unit.id)
-            } label: {
-                Text(isSelected ? "[x]" : "[ ]")
-                    .font(Signalwave.mono(.body, weight: .bold))
-                    .foregroundStyle(isSelected ? Signalwave.green : Signalwave.dim)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isSelected ? "disarm \(unit.name)" : "arm \(unit.name)")
-
-            Button {
-                Task { await model.inspect(unit) }
-            } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    icon(unit)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(unit.name)
-                            .font(Signalwave.mono(.body))
-                            .foregroundStyle(Signalwave.fg)
-                        Text(subtitle(unit))
-                            .font(Signalwave.mono(.caption))
-                            .foregroundStyle(Signalwave.dim)
-                        if !status.text.isEmpty {
-                            statusLabel(status)
-                        }
+        Button {
+            Task { await model.inspect(unit) }
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                icon(unit)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(unit.name)
+                        .font(Signalwave.mono(.body))
+                        .foregroundStyle(Signalwave.fg)
+                    Text(subtitle(unit))
+                        .font(Signalwave.mono(.caption))
+                        .foregroundStyle(Signalwave.dim)
+                    if !status.text.isEmpty {
+                        statusLabel(status)
                     }
+                }
 
-                    Spacer(minLength: 8)
+                Spacer(minLength: 8)
 
+                if status.isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Signalwave.green)
+                } else {
                     Image(systemName: "chevron.right")
                         .font(.caption)
                         .foregroundStyle(Signalwave.dim)
                         .padding(.top, 2)
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("inspect \(unit.name)")
-            .accessibilityHint("reads this audio unit locally and shows what would be sent")
-
-            if status.isWorking {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Signalwave.green)
-            } else if model.hasDetails(unit.id) {
-                Button {
-                    model.prepareExport(for: unit.id)
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .foregroundStyle(Signalwave.green)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("save details to files")
-            }
+            .contentShape(Rectangle())
+            .padding(12)
         }
-        .padding(12)
-        .background(isSelected ? Signalwave.surface : Color.clear)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isSelected ? Signalwave.green : Color.clear)
-                .frame(width: 2)
-                .frame(width: 10, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { model.toggle(unit.id) }
-        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("inspect \(unit.name)")
+        .accessibilityHint("reads this audio unit locally and shows what was synced")
     }
 
     @ViewBuilder
@@ -295,37 +271,15 @@ struct AudioUnitsView: View {
         .foregroundStyle(color)
     }
 
-    // MARK: - Action bar
+    // MARK: - Status bar
 
-    private var actionBar: some View {
-        VStack(spacing: 10) {
+    private var statusBar: some View {
+        VStack(spacing: 8) {
+            statusLine
             if let summary = model.runSummary {
                 Text("> \(summary)")
                     .font(Signalwave.mono(.footnote))
                     .foregroundStyle(Signalwave.dim)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            Button {
-                Task { await model.scanAndSendSelected(client: receiver.client) }
-            } label: {
-                HStack(spacing: 10) {
-                    if model.isBusy {
-                        ProgressView().tint(Signalwave.bg)
-                    } else {
-                        Image(systemName: "dot.radiowaves.up.forward")
-                    }
-                    Text(sendLabel)
-                }
-            }
-            .buttonStyle(.signalPrimary)
-            .disabled(model.isBusy || model.selected.isEmpty)
-
-            if !receiver.isConfigured {
-                Text("// no mcp-midi-controller host — units are read and can be exported via the save button.")
-                    .font(Signalwave.mono(.caption2))
-                    .foregroundStyle(Signalwave.dim)
-                    .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -338,12 +292,40 @@ struct AudioUnitsView: View {
         }
     }
 
-    private var sendLabel: String {
-        let n = model.selected.count
-        if model.isBusy { return "working…" }
-        let configured = receiver.isConfigured
-        if n == 0 { return configured ? "read & send" : "read" }
-        return configured ? "read & send \(n)" : "read \(n)"
+    @ViewBuilder
+    private var statusLine: some View {
+        if model.isBusy {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small).tint(Signalwave.green)
+                Text("syncing \(syncedCount)/\(model.units.count)…")
+                    .font(Signalwave.mono(.footnote))
+                    .foregroundStyle(Signalwave.fg)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if !receiver.isConfigured {
+            consoleNote("waiting for mcp-midi-controller — units sync automatically once it is found.")
+        } else if !receiver.isReachable {
+            consoleNote("daemon discovered — connecting, then syncing automatically…")
+        } else if model.runSummary == nil {
+            consoleNote("connected — syncing automatically.")
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Signalwave.green)
+                Text("synced to mcp-midi-controller")
+                    .font(Signalwave.mono(.footnote))
+                    .foregroundStyle(Signalwave.fg)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func consoleNote(_ text: String) -> some View {
+        Text("// \(text)")
+            .font(Signalwave.mono(.caption))
+            .foregroundStyle(Signalwave.dim)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

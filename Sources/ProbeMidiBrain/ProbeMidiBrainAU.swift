@@ -112,7 +112,7 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
     /// `HostDiagnosticsReporter` (started with render resources). The UI reads this
     /// passively — capture is owned by the reporter, not the panel — so it is nil
     /// until render resources are allocated and the reporter has ticked once.
-    public var latestDiagnostics: HostIntrospection? {
+    public var latestDiagnostics: HostDiagnostics? {
         control.withLock { $0.diagnostics?.latest }
     }
 
@@ -122,7 +122,7 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
     /// fresh snapshot, or nil when the reporter is not running (render resources
     /// not yet allocated).
     @discardableResult
-    public func captureIntrospection() -> HostIntrospection? {
+    public func captureIntrospection() -> HostDiagnostics? {
         control.withLock { $0.diagnostics?.capture() }
     }
 
