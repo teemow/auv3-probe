@@ -50,13 +50,32 @@ private func isLevelControl(_ name: String) -> Bool {
     !surfaceNameWords(name).isDisjoint(with: ["level", "volume", "vol", "gain", "master", "fader"])
 }
 
+/// The rec-arm function words, a subset of `consoleSwitchWords`.
+private let consoleRecWords: Set<String> = ["rec", "record", "recarm", "arm"]
+
+/// Every channel-function word behind the console M/S/R switches. Shared with
+/// `SurfaceConsoleSwitch`'s caption so the two lists cannot drift.
+private let consoleSwitchWords: Set<String> = consoleRecWords.union(["mute", "solo"])
+
 /// Mixer channel functions rendered as console letter switches.
 private func consoleSwitchKind(_ name: String) -> (letter: String, accent: Color)? {
     let words = surfaceNameWords(name)
     if words.contains("mute") { return ("M", Signalwave.amber) }
     if words.contains("solo") { return ("S", Signalwave.green) }
-    if !words.isDisjoint(with: ["rec", "record", "recarm", "arm"]) { return ("R", Signalwave.amber) }
+    if !words.isDisjoint(with: consoleRecWords) { return ("R", Signalwave.amber) }
     return nil
+}
+
+private extension ControlSurfaceDescriptor.Control {
+    /// The off/on value pair of a two-state toggle, nil for anything else.
+    /// `values` is daemon-ordered by wire value, so `off` is the state a
+    /// write-only widget starts in (unsent). Lets each toggle view validate
+    /// its own input instead of trusting the grouping in
+    /// `SurfaceDeviceModule` from afar.
+    var toggleStates: (off: ControlSurfaceDescriptor.NamedValue, on: ControlSurfaceDescriptor.NamedValue)? {
+        guard let values = values, values.count == 2 else { return nil }
+        return (values[0], values[1])
+    }
 }
 
 /// Transport glyph + sort rank, in console order: rewind, play, stop,
@@ -311,6 +330,21 @@ private extension View {
     }
 }
 
+/// Clamp `raw` to the control's wire range, step it to an integer, and emit it
+/// only on an actual step change so a slow drag never spams duplicate
+/// messages — the shared emit path of the channel strip and the knob.
+@MainActor
+private func sendStepped(_ raw: Double,
+                         control: ControlSurfaceDescriptor.Control,
+                         model: BrainViewModel,
+                         value: Binding<Double>) {
+    let range = control.faderRange
+    let stepped = min(max(raw, range.lowerBound), range.upperBound).rounded()
+    guard stepped != value.wrappedValue else { return }
+    value.wrappedValue = stepped
+    model.sendSurface(control.msg, value: Int(stepped))
+}
+
 // MARK: - Channel strip (fader)
 
 /// One mixer channel strip: LED value readout, a vertical long-throw fader
@@ -405,14 +439,8 @@ private struct SurfaceChannelStrip: View {
         set(range.lowerBound + Double(t) * (range.upperBound - range.lowerBound))
     }
 
-    /// Clamp, step and emit — only on an actual step change so a slow drag
-    /// does not spam duplicate messages.
     private func set(_ raw: Double) {
-        let range = control.faderRange
-        let stepped = min(max(raw, range.lowerBound), range.upperBound).rounded()
-        guard stepped != value else { return }
-        value = stepped
-        model.sendSurface(control.msg, value: Int(stepped))
+        sendStepped(raw, control: control, model: model, value: $value)
     }
 }
 
@@ -519,14 +547,8 @@ private struct SurfaceKnob: View {
         set(anchor - Double(translation / Self.dragTravel) * span)
     }
 
-    /// Clamp, step and emit — only on an actual step change so a slow drag
-    /// does not spam duplicate messages.
     private func set(_ raw: Double) {
-        let range = control.faderRange
-        let stepped = min(max(raw, range.lowerBound), range.upperBound).rounded()
-        guard stepped != value else { return }
-        value = stepped
-        model.sendSurface(control.msg, value: Int(stepped))
+        sendStepped(raw, control: control, model: model, value: $value)
     }
 }
 
@@ -543,12 +565,12 @@ private struct SurfaceTransportButton: View {
     private var glyph: String { transportGlyph(control.name).icon }
 
     var body: some View {
-        if control.widgetKind == .toggle, let values = control.values, values.count == 2 {
+        if control.widgetKind == .toggle, let states = control.toggleStates {
             Button {
                 engaged.toggle()
-                model.sendSurface(control.msg, value: values[engaged ? 1 : 0].value)
+                model.sendSurface(control.msg, value: (engaged ? states.on : states.off).value)
             } label: {
-                label(caption: values[engaged ? 1 : 0].label)
+                label(caption: (engaged ? states.on : states.off).label)
                     .foregroundStyle(engaged ? Signalwave.bg : Signalwave.green)
                     .background(
                         RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -603,42 +625,42 @@ private struct SurfaceConsoleSwitch: View {
     let accent: Color
     @State private var engaged = false
 
-    private var values: [ControlSurfaceDescriptor.NamedValue] { control.values ?? [] }
-
     var body: some View {
-        Button {
-            engaged.toggle()
-            model.sendSurface(control.msg, value: values[engaged ? 1 : 0].value)
-        } label: {
-            VStack(spacing: 4) {
-                Text(letter)
-                    .font(Signalwave.mono(.title3, weight: .bold))
-                    .foregroundStyle(engaged ? Signalwave.bg : accent)
-                    .frame(width: 46, height: 40)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(engaged ? accent : Signalwave.bg)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .stroke(engaged ? accent : Signalwave.grid, lineWidth: 1)
-                    )
-                Text(channelCaption)
-                    .font(Signalwave.mono(.caption2))
-                    .foregroundStyle(Signalwave.dim)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 56)
+        if let states = control.toggleStates {
+            Button {
+                engaged.toggle()
+                model.sendSurface(control.msg, value: (engaged ? states.on : states.off).value)
+            } label: {
+                VStack(spacing: 4) {
+                    Text(letter)
+                        .font(Signalwave.mono(.title3, weight: .bold))
+                        .foregroundStyle(engaged ? Signalwave.bg : accent)
+                        .frame(width: 46, height: 40)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(engaged ? accent : Signalwave.bg)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(engaged ? accent : Signalwave.grid, lineWidth: 1)
+                        )
+                    Text(channelCaption)
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 56)
+                }
             }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 
     /// The channel the switch belongs to: the display name minus the function
-    /// word ("moog mute" → "moog"). The word list mirrors `consoleSwitchKind`.
+    /// word ("moog mute" → "moog").
     private var channelCaption: String {
         let words = surfaceDisplayName(control.name).split(separator: " ").filter {
-            !["mute", "solo", "rec", "record", "arm", "recarm"].contains($0.lowercased())
+            !consoleSwitchWords.contains($0.lowercased())
         }
         return words.isEmpty ? surfaceDisplayName(control.name) : words.joined(separator: " ")
     }
@@ -655,43 +677,42 @@ private struct SurfaceLedToggle: View {
     let model: BrainViewModel
     @State private var engaged = false
 
-    private var values: [ControlSurfaceDescriptor.NamedValue] { control.values ?? [] }
-
     var body: some View {
-        Button {
-            engaged.toggle()
-            let value = values[engaged ? 1 : 0]
-            model.sendSurface(control.msg, value: value.value)
-        } label: {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(engaged ? Signalwave.green : Signalwave.grid)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: engaged ? Signalwave.green.opacity(0.8) : .clear, radius: 3)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(surfaceDisplayName(control.name))
-                        .font(Signalwave.mono(.caption, weight: .semibold))
-                        .foregroundStyle(Signalwave.fg)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(values[engaged ? 1 : 0].label)
-                        .font(Signalwave.mono(.caption2))
-                        .foregroundStyle(engaged ? Signalwave.green : Signalwave.dim)
-                        .lineLimit(1)
+        if let states = control.toggleStates {
+            Button {
+                engaged.toggle()
+                model.sendSurface(control.msg, value: (engaged ? states.on : states.off).value)
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(engaged ? Signalwave.green : Signalwave.grid)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: engaged ? Signalwave.green.opacity(0.8) : .clear, radius: 3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(surfaceDisplayName(control.name))
+                            .font(Signalwave.mono(.caption, weight: .semibold))
+                            .foregroundStyle(Signalwave.fg)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text((engaged ? states.on : states.off).label)
+                            .font(Signalwave.mono(.caption2))
+                            .foregroundStyle(engaged ? Signalwave.green : Signalwave.dim)
+                            .lineLimit(1)
+                    }
                 }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Signalwave.bg)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(engaged ? Signalwave.green.opacity(0.6) : Signalwave.grid, lineWidth: 1)
+                )
             }
-            .padding(.vertical, 7)
-            .padding(.horizontal, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Signalwave.bg)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(engaged ? Signalwave.green.opacity(0.6) : Signalwave.grid, lineWidth: 1)
-            )
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 }
 

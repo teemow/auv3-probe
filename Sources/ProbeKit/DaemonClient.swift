@@ -9,10 +9,12 @@ import Foundation
 //     POST /auv3-probe              — one audio unit's AudioUnitDetails
 //     POST /auv3-probe/diagnostics  — the full scan report (incl. failures)
 //   AUM sessions (.aumproj, internal/aumreceiver):
-//     POST   /aum-session?name=<file> — upload one .aumproj's raw bytes
+//     POST   /aum-session?path=<rel>  — upload one .aumproj's raw bytes, staged
+//                                       at its AUM-folder-relative path (?name=
+//                                       is the legacy flat fallback)
 //     GET    /aum-session             — manifest of files the receiver can return
-//     GET    /aum-session/{file}      — one file's raw bytes (to write into AUM)
-//     DELETE /aum-session/{file}      — remove one staged file (controller-side)
+//     GET    /aum-session/{file...}   — one file's raw bytes (to write into AUM)
+//     DELETE /aum-session/{file...}   — remove one staged file (controller-side)
 //     DELETE /aum-session             — clear all staged files (controller-side)
 //   Audio tap (AUv3 effect, internal/auv3receiver):
 //     WS   /audio-stream            — live downsampled PCM + features (ProbeAudioTap)
@@ -30,6 +32,7 @@ import Foundation
 
 public enum DaemonError: LocalizedError {
     case badHost(String)
+    case badSessionPath
     case notOK(Int, String)
     case healthzFailed(Int)
 
@@ -37,6 +40,8 @@ public enum DaemonError: LocalizedError {
         switch self {
         case .badHost(let h):
             return "could not parse host \"\(h)\" (try host:7800)"
+        case .badSessionPath:
+            return "empty session path"
         case .notOK(let code, let body):
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
             return "mcp-midi-controller returned HTTP \(code)\(trimmed.isEmpty ? "" : ": \(trimmed)")"
@@ -128,17 +133,24 @@ public struct DaemonClient {
 
     // MARK: - AUM sessions (.aumproj)
 
-    /// `POST /aum-session?name=<filename>` with the verbatim `.aumproj` bytes
-    /// (`application/octet-stream`, no JSON re-encoding). The receiver derives a
-    /// staging id from the `name` query. The optional `modified` date is sent so
-    /// the receiver can preserve the file's original timestamp (keeping device and
-    /// controller rows showing the same date). Returns the decoded summary.
-    public func uploadAUMSession(data: Data, filename: String, modified: Date? = nil) async throws -> AUMSessionSummary {
+    /// `POST /aum-session?path=<relative path>` with the verbatim `.aumproj`
+    /// bytes (`application/octet-stream`, no JSON re-encoding). `relativePath`
+    /// is the file's path relative to the linked AUM folder (e.g.
+    /// `Live sets/Set.aumproj`); the receiver stages it at the same relative
+    /// path, so the controller-side tree mirrors the iPad's AUM folder exactly
+    /// and a later write-back lands in the original subfolder, not AUM's root.
+    /// When `relativePath` is empty the legacy `?name=` flat staging is used.
+    /// The optional `modified` date is sent so the receiver can preserve the
+    /// file's original timestamp (keeping device and controller rows showing
+    /// the same date). Returns the decoded summary.
+    public func uploadAUMSession(data: Data, filename: String, relativePath: String = "", modified: Date? = nil) async throws -> AUMSessionSummary {
         var components = URLComponents(
             url: baseURL.appendingPathComponent("aum-session"),
             resolvingAgainstBaseURL: false
         )
-        var items = [URLQueryItem(name: "name", value: filename)]
+        var items = relativePath.isEmpty
+            ? [URLQueryItem(name: "name", value: filename)]
+            : [URLQueryItem(name: "path", value: relativePath)]
         if let modified = modified {
             items.append(URLQueryItem(name: "modified", value: Self.rfc3339.string(from: modified)))
         }
@@ -153,6 +165,23 @@ public struct DaemonClient {
         return try JSONDecoder().decode(AUMSessionSummary.self, from: body)
     }
 
+    /// Build `/aum-session/<relative path>` by appending each path segment, so
+    /// staged files in subfolders (the receiver mirrors the iPad's AUM tree)
+    /// stay addressable and segments with spaces/unicode are percent-encoded.
+    /// Throws on an effectively empty path: the bare `/aum-session` URL is the
+    /// manifest (GET) / clear-all (DELETE) endpoint, which a single-file
+    /// download or delete must never hit by accident.
+    private func aumSessionURL(path: String) throws -> URL {
+        var url = baseURL.appendingPathComponent("aum-session")
+        var hasSegments = false
+        for segment in path.split(separator: "/") where !segment.isEmpty {
+            url.appendPathComponent(String(segment))
+            hasSegments = true
+        }
+        guard hasSegments else { throw DaemonError.badSessionPath }
+        return url
+    }
+
     /// `GET /aum-session` — the manifest of files mcp-midi-controller can return,
     /// mapped to the app's UI entries.
     public func listAUMSessions() async throws -> [AUMSessionEntry] {
@@ -164,12 +193,13 @@ public struct DaemonClient {
         return manifest.sessions.map(\.asEntry)
     }
 
-    /// `GET /aum-session/{file}` — the verbatim file bytes plus the filename the
-    /// receiver advertises via `Content-Disposition` (falling back to `file`).
-    /// The returned bytes are written into AUM unchanged.
-    public func downloadAUMSession(filename: String) async throws -> (data: Data, filename: String) {
-        let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(filename)
-        var request = URLRequest(url: url)
+    /// `GET /aum-session/{file...}` — the verbatim file bytes plus the filename
+    /// the receiver advertises via `Content-Disposition` (falling back to the
+    /// path's last segment). `path` is the staging-relative path from the
+    /// manifest (which may carry subfolder segments). The returned bytes are
+    /// written into AUM unchanged.
+    public func downloadAUMSession(path: String) async throws -> (data: Data, filename: String) {
+        var request = URLRequest(url: try aumSessionURL(path: path))
         request.httpMethod = "GET"
         request.timeoutInterval = DaemonClient.transferTimeout
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -178,15 +208,15 @@ public struct DaemonClient {
         guard (200..<300).contains(code) else {
             throw DaemonError.notOK(code, String(data: data, encoding: .utf8) ?? "")
         }
-        let resolved = Self.filename(from: http) ?? filename
+        let fallback = path.split(separator: "/").last.map(String.init) ?? path
+        let resolved = Self.filename(from: http) ?? fallback
         return (data, resolved)
     }
 
-    /// `DELETE /aum-session/{file}` — remove one staged file from
+    /// `DELETE /aum-session/{file...}` — remove one staged file from
     /// mcp-midi-controller (controller-side only; never touches the iPad).
-    public func deleteAUMSession(filename: String) async throws {
-        let url = baseURL.appendingPathComponent("aum-session").appendingPathComponent(filename)
-        var request = URLRequest(url: url)
+    public func deleteAUMSession(path: String) async throws {
+        var request = URLRequest(url: try aumSessionURL(path: path))
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
         _ = try await perform(request)
