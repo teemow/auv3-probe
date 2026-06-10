@@ -244,11 +244,45 @@ consumes the contract.
    decode). `velocity` defaults to 100 for `noteOn` and 0 for `noteOff` when
    omitted. Note duration is the daemon's concern: `play_notes` sends `noteOn`,
    waits, then `noteOff`.
-2. **Brain → daemon:** nothing on the data path (inbound messages are ignored).
+2. **Daemon → brain — `controlSurface` manifest frame** (same channel, pushed
+   after every session-rig (auto-)import and on brain connect). It describes the
+   current AUM session's rig as a renderable control surface — one entry per
+   session-derived device, each control carrying a widget kind and the **exact
+   MIDI message the session mapping stores**:
+
+   ```json
+   {
+     "type": "controlSurface",
+     "session": "my-set", "title": "My Set",
+     "devices": [
+       { "name": "aum", "controls": [
+         { "name": "synth_level", "widget": "fader",
+           "msg": { "type": "cc", "channel": 1, "number": 16 } },
+         { "name": "synth_mute", "widget": "toggle",
+           "msg": { "type": "cc", "channel": 1, "number": 17 },
+           "values": [ { "label": "unmute", "value": 0 },
+                       { "label": "mute",   "value": 127 } ] }
+       ] }
+     ]
+   }
+   ```
+
+   `widget` is `fader | toggle | trigger | enum | preset` (unknown kinds are
+   skipped, not fatal); `msg.type` is `cc | noteOn | noteOff | pc` with a
+   1-based `channel`; `values` names the wire values for toggle/trigger/enum;
+   `min`/`max` bound a fader (default 0..127). Decoded into
+   `ControlSurfaceDescriptor` (`Sources/ProbeMidiBrain/ControlSurface.swift`),
+   **cached in the AU's `fullState`** (so AUM persists it with the session) and
+   rendered as the "Control surface" section of the plugin UI. Widget taps emit
+   straight into the engine's surface ring → AUM MIDI Control — no daemon
+   round-trip, so the surface keeps working when the daemon is offline. Frame
+   types the brain does not know are silently dropped, so the protocol extends
+   backward-compatibly in both directions.
+3. **Brain → daemon:** nothing on the data path (inbound messages are ignored).
    Connect / disconnect is observed daemon-side and surfaced via `NotifyMidiControl`.
 
-The brain converts each frame into a `MidiCommand` and enqueues it for the render
-thread (see realtime-safety, above).
+The brain converts each command frame into a `MidiCommand` and enqueues it for
+the render thread (see realtime-safety, above).
 
 ## Diagnostics protocol (the wire contract)
 

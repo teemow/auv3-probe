@@ -71,6 +71,12 @@ final class BrainEngine: @unchecked Sendable {
     // generous burst of agent-driven commands; overflow is dropped by the ring.
     let commandRing = MidiCommandRing(capacity: 256)
 
+    // Second command ring for the plugin UI's control surface (the rings are
+    // SPSC, so the main thread cannot share commandRing with the networking
+    // thread). Drained at the same point in the render cycle, so surface taps
+    // emit even when the daemon is offline. Sized for a fast fader drag.
+    let surfaceRing = MidiCommandRing(capacity: 256)
+
     // Lock-free observed-MIDI ring: the render thread pushes EVERY inbound event
     // (channel voice, system-realtime, sysex leaders) for the host control-
     // surface analysis; a UI/report thread drains it to tally what AUM delivers.
@@ -104,7 +110,8 @@ final class BrainEngine: @unchecked Sendable {
     let statusPlaying = ManagedAtomic<Bool>(false)
     /// Bumped every time a scene change is emitted, so the UI can flash activity.
     let statusEmitCount = ManagedAtomic<Int>(0)
-    /// Bumped every time a command from the LAN channel is emitted.
+    /// Bumped every time a command from the LAN channel or the local control
+    /// surface is emitted.
     let statusCommandCount = ManagedAtomic<Int>(0)
 
     /// Publish a new program (called from the main/UI thread).
@@ -211,18 +218,23 @@ final class BrainEngine: @unchecked Sendable {
 
     // MARK: - LAN command channel (the "hands")
 
-    /// Drain every queued LAN command and emit it via midiOut. Realtime-safe:
-    /// pops are wait-free, the byte building uses a stack tuple (no allocation),
-    /// and midiOut is the host-provided realtime block. Called only on the
-    /// render thread.
+    /// Drain every queued LAN and surface command and emit it via midiOut.
+    /// Realtime-safe: pops are wait-free, the byte building uses a stack tuple
+    /// (no allocation), and midiOut is the host-provided realtime block. Called
+    /// only on the render thread.
     private func drainCommands(at sampleTime: Double) {
+        drain(commandRing, at: sampleTime)
+        drain(surfaceRing, at: sampleTime)
+    }
+
+    private func drain(_ ring: MidiCommandRing, at sampleTime: Double) {
         guard let midiOut = midiOut else {
             // No output block yet: drain and discard so the ring cannot back up.
-            while commandRing.pop(into: &scratchCommand) {}
+            while ring.pop(into: &scratchCommand) {}
             return
         }
         var emitted = 0
-        while commandRing.pop(into: &scratchCommand) {
+        while ring.pop(into: &scratchCommand) {
             let cmd = scratchCommand
             emit(via: midiOut, at: sampleTime) { ptr in
                 switch cmd.kind {
