@@ -18,7 +18,9 @@ public final class ProbeMidiBrainViewController: AUViewController, AUAudioUnitFa
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        preferredContentSize = CGSize(width: 480, height: 620)
+        // Tall enough for the session control surface on top of the authoring
+        // panels (was 480×620 before the surface existed).
+        preferredContentSize = CGSize(width: 520, height: 760)
         view.backgroundColor = UIColor(Signalwave.bg)
         installUIIfReady()
     }

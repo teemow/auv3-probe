@@ -45,6 +45,17 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
     /// Key under which the program is stored inside `fullState`.
     private static let programStateKey = "probeMidiBrainProgram"
 
+    /// Key under which the cached control-surface manifest is stored inside
+    /// `fullState`, so AUM persists it with the session and the surface renders
+    /// (and emits) even when the daemon is offline.
+    private static let controlSurfaceStateKey = "probeMidiBrainControlSurface"
+
+    // The cached control-surface manifest. Written from the BrainController's
+    // socket queue (live push) and from the fullState setter (session load);
+    // read by the UI poll and the fullState getter — hence the lock box, never
+    // touched by the render thread.
+    private let surfaceBox = OSAllocatedUnfairLockBox<ControlSurfaceDescriptor?>(nil)
+
     public override init(componentDescription: AudioComponentDescription,
                          options: AudioComponentInstantiationOptions = []) throws {
         try super.init(componentDescription: componentDescription, options: options)
@@ -93,6 +104,30 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
     public func updateProgram(_ newProgram: BrainProgram) {
         program = newProgram
         engine.setProgram(newProgram)
+    }
+
+    // MARK: - Control surface (session-derived manifest + local emission)
+
+    /// The cached control-surface manifest (nil until the daemon pushed one or
+    /// AUM restored it from the session). Polled by the UI.
+    public var controlSurface: ControlSurfaceDescriptor? {
+        surfaceBox.value
+    }
+
+    /// Replace the cached manifest. Called from the BrainController callback
+    /// (socket queue) and the fullState setter; AUM picks the new value up via
+    /// the fullState getter on its next session save.
+    public func updateControlSurface(_ surface: ControlSurfaceDescriptor?) {
+        surfaceBox.value = surface
+    }
+
+    /// Enqueue one control-surface command for the render thread to emit via
+    /// the host midiOut. Main-thread producer (the plugin UI) on its own SPSC
+    /// ring — the LAN channel keeps `commandRing` to itself. Works without the
+    /// daemon: this is the offline path of the surface.
+    public func sendSurfaceCommand(_ command: MidiCommand) {
+        // Overflow is dropped by the ring, same policy as the LAN channel.
+        _ = engine.surfaceRing.push(command)
     }
 
     /// The engine's mirrored status, for the UI to poll.
@@ -166,6 +201,11 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         // start it — it auto-discovers the daemon and auto-reconnects.
         control.withLock { state in
             let controller = BrainController(ring: engine.commandRing)
+            // Cache each pushed control-surface manifest (the lock box makes
+            // the socket-queue write safe against UI/fullState readers).
+            controller.onControlSurface = { [weak self] surface in
+                self?.updateControlSurface(surface)
+            }
             state.controller = controller
             controller.start()
 
@@ -210,6 +250,10 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
             if let data = try? JSONEncoder().encode(program) {
                 state[Self.programStateKey] = data
             }
+            if let surface = surfaceBox.value,
+               let data = try? JSONEncoder().encode(surface) {
+                state[Self.controlSurfaceStateKey] = data
+            }
             return state
         }
         set {
@@ -217,6 +261,17 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
             if let data = newValue?[Self.programStateKey] as? Data,
                let decoded = try? JSONDecoder().decode(BrainProgram.self, from: data) {
                 updateProgram(decoded)
+            }
+            if let state = newValue {
+                // A restored state without a surface key (or an undecodable one)
+                // clears the cache: the surface is session-derived, so keeping
+                // the previous session's controls would emit into the wrong rig.
+                if let data = state[Self.controlSurfaceStateKey] as? Data,
+                   let surface = try? JSONDecoder().decode(ControlSurfaceDescriptor.self, from: data) {
+                    updateControlSurface(surface)
+                } else {
+                    updateControlSurface(nil)
+                }
             }
         }
     }

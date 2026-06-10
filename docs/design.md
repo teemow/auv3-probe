@@ -306,7 +306,7 @@ this), shared by both build systems:
 | `Sources/AUv3ProbeApp/AUMSessionsView.swift` | The AUM-sessions **signalwave** ferry: upload `.aumproj`, manifest list with per-row inspect + download, and the inspector `.sheet`. |
 | `Sources/AUv3ProbeApp/AUMSessionInspectorView.swift` | The inspector rendering one `AUMSessionMap` (header, summary, channel→node tree, mappings, raw JSON). |
 | **AUv3 extensions (job 3)** | see [auv3-extension.md](auv3-extension.md) |
-| `Sources/ProbeMidiBrain/` | `aumi` MIDI processor: `ProbeMidiBrainAU` (AU) + `BrainEngine` (realtime core) + `ProbeMidiBrainViewController` (factory) + `ProbeMidiBrainView` (authoring UI). |
+| `Sources/ProbeMidiBrain/` | `aumi` MIDI processor: `ProbeMidiBrainAU` (AU) + `BrainEngine` (realtime core) + `BrainController` (`/midi-control` WebSocket client) + `ControlSurface` (daemon-pushed `controlSurface` manifest, cached in `fullState`) + `ProbeMidiBrainViewController` (factory) + `ProbeMidiBrainView` (authoring UI + the rendered control surface). |
 | `Sources/ProbeAudioTap/` | `aufx` audio tap: `ProbeAudioTapAU` (AU) + `TapDSP` (realtime core) + `TapStreamer` (WebSocket) + `ProbeAudioTapViewController` (factory) + `ProbeAudioTapView` (control UI). |
 | **Build** | |
 | `Resources/Info.plist` | Local-network usage string + ATS local-networking allowance; orientations (macOS/XcodeGen build). |

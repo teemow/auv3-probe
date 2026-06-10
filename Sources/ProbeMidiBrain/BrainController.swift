@@ -21,11 +21,21 @@ import ProbeKit
 //       {"type":"cc","channel":1,"controller":17,"value":64}
 //       {"type":"pc","channel":1,"program":3}
 //       {"type":"transport","action":"start"|"stop"|"continue"}
+//   - plus the control-surface manifest the daemon pushes after a session
+//     import (unknown frame types are silently dropped, so older builds stay
+//     compatible):
+//       {"type":"controlSurface","session":"...","title":"...","devices":[...]}
+//     Decoded into ControlSurfaceDescriptor and handed to `onControlSurface`
+//     (the AU caches it in fullState and the plugin UI renders it).
 final class BrainController {
     private let ring: MidiCommandRing
     private let socket: ReconnectingWebSocket
     // Reused across frames (decoding runs only on the socket's serial queue).
     private let decoder = JSONDecoder()
+
+    /// Called (on the socket's queue) with each decoded control-surface
+    /// manifest the daemon pushes. Set by the AU before `start()`.
+    var onControlSurface: ((ControlSurfaceDescriptor) -> Void)?
 
     init(ring: MidiCommandRing) {
         self.ring = ring
@@ -51,10 +61,16 @@ final class BrainController {
         @unknown default:
             return
         }
-        guard let frame = try? decoder.decode(CommandFrame.self, from: data),
-              let cmd = frame.toMidiCommand() else {
+        guard let frame = try? decoder.decode(CommandFrame.self, from: data) else { return }
+        if frame.type == ControlSurfaceDescriptor.frameType {
+            // Not a MIDI command: the manifest goes to the AU (cache + UI),
+            // never onto the realtime ring.
+            if let surface = try? decoder.decode(ControlSurfaceDescriptor.self, from: data) {
+                onControlSurface?(surface)
+            }
             return
         }
+        guard let cmd = frame.toMidiCommand() else { return }
         // Push onto the lock-free ring; the render thread drains it. Overflow is
         // dropped by the ring (returns false) — acceptable under command bursts.
         _ = ring.push(cmd)

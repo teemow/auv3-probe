@@ -18,12 +18,17 @@ final class BrainViewModel: ObservableObject {
     /// capture (which used to die whenever the UI closed) — it just reflects the
     /// reporter's `latest` on each poll tick.
     @Published var introspection: HostDiagnostics?
+    /// The cached session control surface (daemon-pushed or restored from the
+    /// AUM session via fullState). Mirrored on each poll tick; nil until a
+    /// session has been imported.
+    @Published var surface: ControlSurfaceDescriptor?
     private var timer: Timer?
 
     init(audioUnit: ProbeMidiBrainAU) {
         self.audioUnit = audioUnit
         self.program = audioUnit.program
         self.status = audioUnit.status
+        self.surface = audioUnit.controlSurface
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in self.poll() }
@@ -37,6 +42,35 @@ final class BrainViewModel: ObservableObject {
         status = audioUnit.status
         observed = audioUnit.pollObservedMIDI()
         introspection = audioUnit.latestDiagnostics
+        // Only publish on actual change — the surface arrives rarely (session
+        // import / load) and republishing every tick would rebuild the panel.
+        let latest = audioUnit.controlSurface
+        if latest != surface { surface = latest }
+    }
+
+    // MARK: - Control surface (local emission, no daemon round-trip)
+
+    /// Emit one control-surface message with the given wire value. Pushes onto
+    /// the engine's surface ring; the render thread drains and emits it via the
+    /// host midiOut — works with the daemon offline.
+    func sendSurface(_ msg: ControlSurfaceDescriptor.Msg, value: Int) {
+        guard let cmd = msg.command(value: value) else { return }
+        audioUnit.sendSurfaceCommand(cmd)
+    }
+
+    /// Fire a one-shot control (trigger/preset): emit its fire value and, for
+    /// noteOn messages, the matching release so no note hangs. The release is
+    /// deferred — back-to-back on/off would land in the same render cycle as a
+    /// zero-length note many receivers ignore. asyncAfter keeps the main thread
+    /// as the surface ring's single producer (the ring is SPSC).
+    func fireSurface(_ control: ControlSurfaceDescriptor.Control) {
+        sendSurface(control.msg, value: control.fireValue)
+        if let release = control.msg.releaseCommand {
+            let audioUnit = audioUnit
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100)) {
+                audioUnit.sendSurfaceCommand(release)
+            }
+        }
     }
 
     /// Fire the reporter's on-demand capture (the UI's "dump" button) and mirror
@@ -117,6 +151,10 @@ public struct ProbeMidiBrainView: View {
     /// editable panels so the things you actually tune are at the top.
     @State private var showDiagnostics = false
 
+    /// The session control surface is the performance panel — expanded by
+    /// default (its per-device groups collapse individually).
+    @State private var showControlSurface = true
+
     init(model: BrainViewModel) {
         self.model = model
     }
@@ -127,6 +165,7 @@ public struct ProbeMidiBrainView: View {
                 header
                 DaemonStatusView()
                 statusPanel
+                controlSurfaceSection
                 sectionsPanel
                 footswitchPanel
                 outputPanel
@@ -205,6 +244,57 @@ public struct ProbeMidiBrainView: View {
         let ordered = model.program.orderedSections
         guard index >= 0 && index < ordered.count else { return "-" }
         return ordered[index].name
+    }
+
+    // MARK: - Control surface (session rig, emits locally via the engine ring)
+
+    private var controlSurfaceSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation(.easeOut(duration: 0.12)) { showControlSurface.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: showControlSurface ? "chevron.down" : "chevron.right")
+                    SectionHeader("control surface")
+                    Spacer()
+                    if let surface = model.surface {
+                        Text(surfaceLabel(surface))
+                            .font(Signalwave.mono(.caption2))
+                            .foregroundStyle(Signalwave.dim)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+
+            if showControlSurface {
+                if let surface = model.surface {
+                    // .id on the descriptor (content, not just the session name)
+                    // resets per-device expansion + widget state whenever the
+                    // surface changes — including a re-import of the same
+                    // session with different mappings.
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(surface.devices.enumerated()), id: \.offset) { item in
+                            SurfaceDeviceGroup(device: item.element,
+                                               expandedInitially: surface.devices.count == 1,
+                                               model: model)
+                        }
+                    }
+                    .id(surface)
+                } else {
+                    Text("no surface yet — import an AUM session on the daemon")
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                }
+            }
+        }
+    }
+
+    private func surfaceLabel(_ surface: ControlSurfaceDescriptor) -> String {
+        var name = surface.session
+        if let title = surface.title, !title.isEmpty { name = title }
+        return "\(name) · \(surface.devices.count) device\(surface.devices.count == 1 ? "" : "s")"
     }
 
     // MARK: - Host introspection (control-surface readback)
@@ -551,5 +641,153 @@ public struct ProbeMidiBrainView: View {
             get: { binding.wrappedValue },
             set: { binding.wrappedValue = min(max($0, range.lowerBound), range.upperBound) }
         )
+    }
+}
+
+// MARK: - Control-surface widgets
+
+/// One session-derived device: a collapsible group of its controls. Expansion
+/// is per-group local state (reset when a new session's surface arrives via the
+/// parent's `.id`).
+private struct SurfaceDeviceGroup: View {
+    let device: ControlSurfaceDescriptor.Device
+    let model: BrainViewModel
+    @State private var expanded: Bool
+
+    init(device: ControlSurfaceDescriptor.Device, expandedInitially: Bool, model: BrainViewModel) {
+        self.device = device
+        self.model = model
+        _expanded = State(initialValue: expandedInitially)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text(device.name)
+                        .font(Signalwave.mono(.callout, weight: .semibold))
+                        .foregroundStyle(Signalwave.fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text("\(device.controls.count)")
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                ForEach(Array(device.controls.enumerated()), id: \.offset) { item in
+                    SurfaceControlRow(control: item.element, model: model)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .signalField()
+    }
+}
+
+/// One renderable control, dispatched on its widget kind. Widget state (fader
+/// position, picked value) is local — AUM gives no feedback path, so the
+/// surface is write-only and the state just remembers the last sent value.
+private struct SurfaceControlRow: View {
+    let control: ControlSurfaceDescriptor.Control
+    let model: BrainViewModel
+    @State private var faderValue: Double
+    @State private var selection: Int
+
+    init(control: ControlSurfaceDescriptor.Control, model: BrainViewModel) {
+        self.control = control
+        self.model = model
+        _faderValue = State(initialValue: control.faderRange.lowerBound)
+        _selection = State(initialValue: control.values?.first?.value ?? 0)
+    }
+
+    var body: some View {
+        switch control.widgetKind {
+        case .fader:
+            fader
+        case .toggle, .picker:
+            valuePicker
+        case .trigger, .preset:
+            Button { model.fireSurface(control) } label: {
+                Label(control.name,
+                      systemImage: control.widgetKind == .preset ? "square.stack" : "bolt")
+            }
+            .buttonStyle(.signalGhost)
+        case nil:
+            // A widget kind from a newer daemon: name it, don't render it.
+            HStack(spacing: 6) {
+                name
+                Text("(\(control.widget) — unsupported)")
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
+            }
+        }
+    }
+
+    private var name: some View {
+        Text(control.name)
+            .font(Signalwave.mono(.caption))
+            .foregroundStyle(Signalwave.fg)
+            .lineLimit(1)
+            .truncationMode(.middle)
+    }
+
+    private var fader: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                name
+                Spacer()
+                Text("\(Int(faderValue))")
+                    .font(Signalwave.mono(.caption2))
+                    .foregroundStyle(Signalwave.dim)
+            }
+            Slider(value: $faderValue, in: control.faderRange, step: 1)
+                .tint(Signalwave.green)
+                .onChange(of: faderValue) { newValue in
+                    model.sendSurface(control.msg, value: Int(newValue))
+                }
+        }
+    }
+
+    /// toggle (two named states) and enum (pick-one) share the picker: segmented
+    /// while the labels fit, menu for long enums.
+    ///
+    /// The surface is write-only (AUM gives no feedback path), so `selection`
+    /// starts on the first value without sending it — and since Picker only
+    /// fires onChange on an actual change, sending the first value requires
+    /// selecting another one first. Accepted: the alternative (a "send" button
+    /// per picker) costs more space than the edge case is worth.
+    private var valuePicker: some View {
+        let values = control.values ?? []
+        return VStack(alignment: .leading, spacing: 4) {
+            name
+            if values.count <= 3 {
+                Picker(control.name, selection: $selection) {
+                    ForEach(values, id: \.value) { value in
+                        Text(value.label).tag(value.value)
+                    }
+                }
+                .pickerStyle(.segmented)
+            } else {
+                Picker(control.name, selection: $selection) {
+                    ForEach(values, id: \.value) { value in
+                        Text(value.label).tag(value.value)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(Signalwave.green)
+            }
+        }
+        .onChange(of: selection) { newValue in
+            model.sendSurface(control.msg, value: newValue)
+        }
     }
 }
