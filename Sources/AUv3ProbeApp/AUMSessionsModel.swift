@@ -98,6 +98,33 @@ final class AUMSessionsModel: ObservableObject {
     // One-off "open a file" inspect feedback.
     @Published var openMessage: String?
 
+    // MARK: - Auto-sync (the AUM-session sibling of AudioUnitsModel.autoSync)
+
+    /// The `host:port` we last completed an auto-sync to. Auto-sync runs once
+    /// per reachable host so a flapping connection does not re-upload the whole
+    /// folder over and over.
+    private var lastSyncedHost: String?
+
+    /// Auto-sync entry point, called whenever the daemon becomes reachable:
+    /// upload every `.aumproj` / `.aum_midimap` from the linked AUM folder with
+    /// its folder-relative path, so the controller's staged tree mirrors the
+    /// iPad's AUM folder exactly. A no-op when no folder is linked, we already
+    /// synced to this host, or an upload is in flight. The host only counts as
+    /// synced when at least one upload landed (or the folder was empty), so a
+    /// fully-failed run is retried on the next reachability change.
+    func autoSync(client: DaemonClient, host: String, folder: AUMFolderBookmark) async {
+        guard !isUploading, host != lastSyncedHost, folder.isBound else { return }
+        refreshFolder(folder)
+        if folderFiles.isEmpty {
+            lastSyncedHost = host
+            return
+        }
+        let ok = await uploadAllFromFolder(folderFiles, client: client, folder: folder)
+        if ok > 0 {
+            lastSyncedHost = host
+        }
+    }
+
     // MARK: - Inspect a picked file (no daemon)
 
     /// Handle the `.fileImporter` result: read the picked file under a
@@ -152,7 +179,8 @@ final class AUMSessionsModel: ObservableObject {
         statuses[file.id] = .uploading
         uploadMessage = nil
         do {
-            uploadSummary = try await client.uploadAUMSession(data: data, filename: file.name, modified: file.modified)
+            uploadSummary = try await client.uploadAUMSession(
+                data: data, filename: file.name, relativePath: file.relativePath, modified: file.modified)
             statuses[file.id] = .uploaded
             await refreshSessions(client: client)
         } catch {
@@ -161,13 +189,15 @@ final class AUMSessionsModel: ObservableObject {
     }
 
     /// Upload `files` enumerated from the linked AUM folder (the caller passes
-    /// the currently visible/filtered set).
-    func uploadAllFromFolder(_ files: [AUMFolderFile], client: DaemonClient?, folder: AUMFolderBookmark) async {
+    /// the currently visible/filtered set). Returns the number of files that
+    /// uploaded successfully (per-file failures land on the row statuses).
+    @discardableResult
+    func uploadAllFromFolder(_ files: [AUMFolderFile], client: DaemonClient?, folder: AUMFolderBookmark) async -> Int {
         guard let client = client else {
             uploadMessage = Self.noHostMessage
-            return
+            return 0
         }
-        guard !files.isEmpty else { return }
+        guard !files.isEmpty else { return 0 }
 
         isUploading = true
         uploadMessage = nil
@@ -182,7 +212,8 @@ final class AUMSessionsModel: ObservableObject {
             statuses[file.id] = .uploading
             do {
                 let data = try folder.read(file)
-                last = try await client.uploadAUMSession(data: data, filename: file.name, modified: file.modified)
+                last = try await client.uploadAUMSession(
+                    data: data, filename: file.name, relativePath: file.relativePath, modified: file.modified)
                 statuses[file.id] = .uploaded
                 ok += 1
             } catch {
@@ -197,6 +228,7 @@ final class AUMSessionsModel: ObservableObject {
             uploadMessage = "uploaded \(ok), \(failed) failed."
         }
         await refreshSessions(client: client)
+        return ok
     }
 
     // MARK: - Manifest
@@ -259,6 +291,7 @@ final class AUMSessionsModel: ObservableObject {
             let entry = AUMSessionEntry(
                 id: file.id,
                 filename: file.name,
+                path: file.relativePath,
                 kind: file.isMidiMap ? "midimap" : "session",
                 generated: false,
                 bytes: file.bytes,
@@ -280,7 +313,7 @@ final class AUMSessionsModel: ObservableObject {
         inspectingID = entry.id
         defer { inspectingID = nil }
         do {
-            let (data, _) = try await client.downloadAUMSession(filename: entry.filename)
+            let (data, _) = try await client.downloadAUMSession(path: entry.path)
             let map = try AUMSessionParser.parse(data: data, isMidiMap: entry.isMidiMap)
             inspected = InspectedAUMSession(entry: entry, map: map)
         } catch {
@@ -300,7 +333,7 @@ final class AUMSessionsModel: ObservableObject {
         }
         statuses[entry.id] = .deleting
         do {
-            try await client.deleteAUMSession(filename: entry.filename)
+            try await client.deleteAUMSession(path: entry.path)
             entries.removeAll { $0.id == entry.id }
             statuses[entry.id] = nil
         } catch {
@@ -360,7 +393,7 @@ final class AUMSessionsModel: ObservableObject {
     /// `.failed` status and returns nil, so callers can `guard let`.
     private func fetchBytes(_ entry: AUMSessionEntry, client: DaemonClient) async -> (data: Data, filename: String)? {
         do {
-            let (data, resolved) = try await client.downloadAUMSession(filename: entry.filename)
+            let (data, resolved) = try await client.downloadAUMSession(path: entry.path)
             return (data, resolved.isEmpty ? entry.filename : resolved)
         } catch {
             statuses[entry.id] = .failed(friendly(error))
@@ -380,14 +413,15 @@ final class AUMSessionsModel: ObservableObject {
 
         if folder.isBound {
             do {
-                // Prefer overwriting the original in place (preserving its nested
-                // subfolder) when exactly one enumerated file matches the name;
-                // otherwise drop it at the folder's top level.
-                let matches = folderFiles.filter { $0.name == filename }
-                if let existing = matches.first, matches.count == 1 {
+                // The entry's staged path mirrors the file's original location in
+                // the AUM tree, so write it back to exactly that spot: overwrite
+                // the enumerated original in place when it still exists, otherwise
+                // recreate it at the same relative path (subfolder included) —
+                // never drop it in AUM's root unless it came from there.
+                if let existing = folderFiles.first(where: { $0.relativePath == entry.path }) {
                     try folder.write(data: data, to: existing)
                 } else {
-                    try folder.write(data: data, filename: filename)
+                    try folder.write(data: data, filename: filename, subfolder: entry.subfolder)
                 }
                 statuses[entry.id] = .saved
                 refreshFolder(folder)
@@ -409,10 +443,13 @@ final class AUMSessionsModel: ObservableObject {
 
     // MARK: - Push & open (one-tap load into AUM)
 
-    /// Download `entry`, write it into the linked AUM folder, then open AUM's
-    /// Universal Link so AUM loads the session (applying its MIDI matrix). This
-    /// is the one-tap "author → load" step of the agent loop. A linked folder is
-    /// required because AUM resolves the session by name from its own folder.
+    /// Download `entry`, write it into the linked AUM folder at its original
+    /// relative path (subfolder included), then open AUM's Universal Link so
+    /// AUM loads the session (applying its MIDI matrix). This is the one-tap
+    /// "author → load" step of the agent loop. A linked folder is required
+    /// because AUM resolves the session by its path inside its own folder —
+    /// the link supports subfolders, so the session is loaded from (and stays
+    /// in) the folder it came from instead of being duplicated into AUM's root.
     func pushAndOpen(_ entry: AUMSessionEntry, client: DaemonClient?, folder: AUMFolderBookmark) async {
         guard let client = client else {
             statuses[entry.id] = .failed(Self.noHostRow)
@@ -424,15 +461,18 @@ final class AUMSessionsModel: ObservableObject {
         }
         statuses[entry.id] = .downloading
         guard let (data, filename) = await fetchBytes(entry, client: client) else { return }
+        // Build the link path from the *resolved* filename (Content-Disposition
+        // may rename), so the file written below and the Universal Link always
+        // refer to the same name.
+        let relativePath = entry.subfolder.isEmpty ? filename : "\(entry.subfolder)/\(filename)"
         do {
-            // Write to the AUM folder root so AUM can resolve it by name.
-            try folder.write(data: data, filename: filename)
+            try folder.write(data: data, filename: filename, subfolder: entry.subfolder)
             refreshFolder(folder)
         } catch {
             statuses[entry.id] = .failed(friendly(error))
             return
         }
-        guard let url = Self.aumOpenURL(filename: filename) else {
+        guard let url = Self.aumOpenURL(relativePath: relativePath) else {
             statuses[entry.id] = .failed("bad session name for the AUM link")
             return
         }
@@ -440,17 +480,20 @@ final class AUMSessionsModel: ObservableObject {
         statuses[entry.id] = opened ? .saved : .failed("AUM did not open (is it installed?)")
     }
 
-    /// Build AUM's Universal Link to open a session by filename:
-    /// `https://kymatica.com/aum/open/<name>.aumproj`.
-    static func aumOpenURL(filename: String) -> URL? {
-        let name = filename.isEmpty ? "session.aumproj" : filename
-        // Escape `/` too (it is allowed in `.urlPathAllowed`) so a name can never
-        // inject extra path segments into the Universal Link.
+    /// Build AUM's Universal Link to open a session by its AUM-folder-relative
+    /// path: `https://kymatica.com/aum/open/<sub/folder/name>.aumproj`. AUM
+    /// supports subfolder segments in the link, so sessions living in nested
+    /// folders open in place. Each segment is percent-encoded individually so a
+    /// filename can never inject extra path segments.
+    static func aumOpenURL(relativePath: String) -> URL? {
+        let path = relativePath.isEmpty ? "session.aumproj" : relativePath
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove("/")
-        guard let encoded = name.addingPercentEncoding(withAllowedCharacters: allowed) else {
-            return nil
+        let segments = path.split(separator: "/").map { seg -> String? in
+            seg.addingPercentEncoding(withAllowedCharacters: allowed)
         }
+        guard !segments.contains(nil) else { return nil }
+        let encoded = segments.compactMap { $0 }.joined(separator: "/")
         return URL(string: "https://kymatica.com/aum/open/\(encoded)")
     }
 

@@ -81,7 +81,10 @@ struct AUMSessionsView: View {
             if receiver.isConfigured && model.entries.isEmpty {
                 Task { await model.refreshSessions(client: receiver.client) }
             }
+            triggerAutoSync()
         }
+        .onChange(of: receiver.isReachable) { _ in triggerAutoSync() }
+        .onChange(of: receiver.host) { _ in triggerAutoSync() }
         .fileImporter(
             isPresented: $isPicking,
             allowedContentTypes: pickingFolder ? [.folder] : [.aumProject, .aumMidiMap, .data],
@@ -104,6 +107,17 @@ struct AUMSessionsView: View {
         .sheet(item: $destinationFor) { entry in
             destinationPicker(entry)
         }
+    }
+
+    /// Fire an auto-sync of the linked AUM folder when the daemon is reachable
+    /// (the session sibling of the audio-units auto-sync). The model itself
+    /// guards against re-syncing the same host, overlapping runs, and the
+    /// no-folder case.
+    private func triggerAutoSync() {
+        guard receiver.isReachable,
+              let client = receiver.client,
+              let host = receiver.host else { return }
+        Task { await model.autoSync(client: client, host: host, folder: folder) }
     }
 
     // MARK: - Header
