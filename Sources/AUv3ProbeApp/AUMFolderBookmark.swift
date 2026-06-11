@@ -209,6 +209,16 @@ final class AUMFolderBookmark: ObservableObject {
         }
     }
 
+    /// The current modification date of a file inside the bound folder (e.g.
+    /// one just written), read under the folder's security scope. Best-effort:
+    /// nil when the folder or file is inaccessible.
+    func modificationDate(of url: URL) -> Date? {
+        let values = try? withFolder { _ in
+            try url.resourceValues(forKeys: [.contentModificationDateKey])
+        }
+        return values?.contentModificationDate
+    }
+
     // MARK: - Bookmark plumbing
 
     /// Resolve the stored bookmark, refreshing it transparently when iOS marks
