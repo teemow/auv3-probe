@@ -13,6 +13,7 @@ import Foundation
 //                                       at its AUM-folder-relative path (?name=
 //                                       is the legacy flat fallback)
 //     GET    /aum-session             — manifest of files the receiver can return
+//                                       (?rev=<n> answers 304 when unchanged)
 //     GET    /aum-session/{file...}   — one file's raw bytes (to write into AUM)
 //     DELETE /aum-session/{file...}   — remove one staged file (controller-side)
 //     DELETE /aum-session             — clear all staged files (controller-side)
@@ -182,15 +183,30 @@ public struct DaemonClient {
         return url
     }
 
-    /// `GET /aum-session` — the manifest of files mcp-midi-controller can return,
-    /// mapped to the app's UI entries.
-    public func listAUMSessions() async throws -> [AUMSessionEntry] {
-        var request = URLRequest(url: baseURL.appendingPathComponent("aum-session"))
+    /// `GET /aum-session?rev=<n>` — the manifest plus its staging rev, or nil
+    /// when the controller answers 304 Not Modified because `ifChangedFrom`
+    /// still matches its current rev. This is the sync engine's cheap poll:
+    /// an idle cycle costs one tiny request, no manifest walk or re-parse on
+    /// either side. Pass nil to always fetch.
+    public func fetchAUMManifest(ifChangedFrom rev: Int64? = nil) async throws -> AUMManifestSnapshot? {
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent("aum-session"),
+            resolvingAgainstBaseURL: false
+        )
+        if let rev = rev {
+            components?.queryItems = [URLQueryItem(name: "rev", value: String(rev))]
+        }
+        guard let url = components?.url else { throw DaemonError.badHost(baseURL.absoluteString) }
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
-        let body = try await perform(request)
-        let manifest = try JSONDecoder().decode(AUMSessionManifest.self, from: body)
-        return manifest.sessions.map(\.asEntry)
+        let (data, code) = try await send(request)
+        if code == 304 { return nil }
+        guard (200..<300).contains(code) else {
+            throw DaemonError.notOK(code, String(data: data, encoding: .utf8) ?? "")
+        }
+        let manifest = try JSONDecoder().decode(AUMSessionManifest.self, from: data)
+        return AUMManifestSnapshot(rev: manifest.rev, entries: manifest.sessions.map(\.asEntry))
     }
 
     /// `GET /aum-session/{file...}` — the verbatim file bytes plus the filename
@@ -241,14 +257,37 @@ public struct DaemonClient {
         return try await perform(request)
     }
 
+    /// Send `request`, returning the body and status code; throws only on
+    /// transport errors. For endpoints where a non-2xx code is meaningful
+    /// (the manifest's 304).
+    private func send(_ request: URLRequest) async throws -> (Data, Int) {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+    }
+
     /// Send `request`, returning the body on a 2xx or throwing `DaemonError`.
     private func perform(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, code) = try await send(request)
         guard (200..<300).contains(code) else {
             throw DaemonError.notOK(code, String(data: data, encoding: .utf8) ?? "")
         }
         return data
+    }
+
+    /// Map transport errors to one short, lowercase console message (daemon
+    /// and folder errors already carry friendly descriptions). Shared by
+    /// every UI surface that reports controller I/O.
+    public static func friendlyMessage(for error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost,
+                 .notConnectedToInternet, .timedOut, .dnsLookupFailed:
+                return "mcp-midi-controller unreachable — check the host and that it's running"
+            default:
+                break
+            }
+        }
+        return error.localizedDescription
     }
 
     /// Extract a `filename="..."` (or bare `filename=...`) from a
@@ -266,6 +305,18 @@ public struct DaemonClient {
             if !trimmed.isEmpty { return trimmed }
         }
         return nil
+    }
+}
+
+/// One fetched `GET /aum-session` manifest: the controller's staging rev plus
+/// its entries mapped to the app's UI model. What the sync engine diffs against.
+public struct AUMManifestSnapshot {
+    public let rev: Int64
+    public let entries: [AUMSessionEntry]
+
+    public init(rev: Int64, entries: [AUMSessionEntry]) {
+        self.rev = rev
+        self.entries = entries
     }
 }
 

@@ -150,14 +150,21 @@ public struct AUMSessionManifest: Decodable {
     }
 
     public let sessions: [Entry]
+    /// The staging dir's monotonic change counter (0 from older daemons that
+    /// don't send one). Bumped controller-side on every staging write —
+    /// receiver uploads/deletes and MCP-tool author/edit/instrument/export —
+    /// so the app can poll `GET /aum-session?rev=<last seen>` and skip all
+    /// sync work on a 304.
+    public let rev: Int64
 
     enum CodingKeys: String, CodingKey {
-        case sessions
+        case sessions, rev
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessions = try c.decodeIfPresent([Entry].self, forKey: .sessions) ?? []
+        rev = try c.decodeIfPresent(Int64.self, forKey: .rev) ?? 0
     }
 }
 

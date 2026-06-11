@@ -240,30 +240,37 @@ collapsed, and defers raw-JSON encoding behind its disclosure to stay responsive
 
 ## Data flow (job 2: AUM sessions)
 
-The app stays a thin byte-ferry: it never parses the `.aumproj` /
+The app stays a thin byte-ferry: it never writes the `.aumproj` /
 `.aum_midimap` plist (a binary `NSKeyedArchiver` archive). All structured
-understanding lives in the Go `internal/aum` library, reached over the LAN.
+understanding lives in the Go `internal/aum` library, reached over the LAN
+(the on-device parser is read-only, for inspect).
 
-1. **Upload** — the user picks a `.aumproj` via `.fileImporter` (read under a
-   security-scoped resource). `DaemonClient.uploadAUMSession(data:filename:)`
-   POSTs the **verbatim bytes** (`application/octet-stream`, filename in
-   `X-AUM-Filename`) to `/aum-session`; the daemon replies with an
-   `AUMSessionSummary` (title, version, channel/node/mapped counts).
-2. **List** — `DaemonClient.listAUMSessions()` (`GET /aum-sessions`) returns the
-   manifest of files the daemon can return (`AUMSessionEntry`: filename, kind
-   session/midimap, generated flag, size, modified time).
-3. **Inspect** — tapping a manifest row fetches the parsed structure via
-   `DaemonClient.fetchAUMSessionMap(id:)` (`GET /aum-session/{id}/map`) — an
-   `AUMSessionMap` mirroring the Go `aum.SessionMap` (channels → nodes,
-   assigned mappings) — rendered read-only by `AUMSessionInspectorView`.
-4. **Download / write back** — `DaemonClient.downloadAUMSession(id:)`
-   (`GET /aum-session/{id}`) returns the verbatim bytes plus the
-   `Content-Disposition` filename; `.fileExporter` writes them back into AUM.
+The tab is one folder browser over a single logical session library: the
+iPad's linked AUM folder and the controller's staging dir are two replicas
+kept identical by `AUMSyncEngine` — concept and sync model in
+[aum-sessions-tab.md](aum-sessions-tab.md).
 
-`AUMSessionsModel` (`@MainActor ObservableObject`) drives the AUM-sessions tab:
-upload state, the fetched manifest, per-row download/export status, and the
-inspect sheet. Verbatim is the whole point — uploads/downloads must not
-re-encode, so the Go plist round-trip is the only transform a session ever sees.
+1. **Sync** — on reachability / app foreground / tab appear / a light
+   foreground poll, the engine fetches the manifest
+   (`GET /aum-session?rev=<last seen>`, 304 when unchanged), enumerates the
+   linked folder (`AUMFolderBookmark`), diffs both sides against its persisted
+   index, and copies **verbatim bytes** in whichever direction changed
+   (`POST /aum-session` / `GET /aum-session/{file...}`). Both sides changed →
+   conflict badge, the user picks a side; deletions do not propagate in v1.
+2. **Open** — tapping a session opens it in AUM via the Universal Link
+   (`https://kymatica.com/aum/open/<relative path>`); no bytes move.
+3. **Inspect** — `AUMSessionParser` parses the on-device copy read-only into
+   an `AUMSessionMap` (channels → nodes, assigned mappings), rendered by
+   `AUMSessionInspectorView`. No daemon required.
+4. **Delete** — explicit and controller-side only
+   (`DELETE /aum-session[/{file...}]`); the app never deletes a file inside
+   the AUM folder.
+
+`AUMSessionsModel` keeps only the user actions (inspect, open-in-AUM, the
+no-folder share fallback, controller-side deletes); everything that moves
+bytes lives in `AUMSyncEngine`. Verbatim is the whole point — sync must not
+re-encode, so the Go plist round-trip is the only transform a session ever
+sees.
 
 ## Source layout
 
@@ -284,7 +291,7 @@ this), shared by both build systems:
 | `Sources/ProbeKit/Receiver.swift` | App connection state, driven by Bonjour discovery: exposes `isConfigured` and the `DaemonClient` factory for the discovered daemon. Injected as an `EnvironmentObject`. |
 | `Sources/ProbeKit/DaemonDiscovery.swift` | Bonjour/mDNS discovery of `mcp-midi-controller` (`_mcpmidi._tcp`): resolves `host:port`, reads version/capabilities from the TXT record, polls `healthz`. The single host source for the app and both extensions. |
 | `Sources/ProbeKit/DaemonStatusView.swift` | The one status element shared verbatim by all three surfaces (app + both AUv3 UIs): discovered IP, connection status, daemon capabilities, and version. |
-| `Sources/ProbeKit/DaemonClient.swift` | The single LAN client to the daemon: audio-unit POSTs (`/auv3-probe`, `/auv3-probe/diagnostics`), AUM-session upload/list/download/map, `/healthz`, and `webSocketURL(path:)` (used by ProbeAudioTap); `DaemonError`. |
+| `Sources/ProbeKit/DaemonClient.swift` | The single LAN client to the daemon: audio-unit POSTs (`/auv3-probe`, `/auv3-probe/diagnostics`), AUM-session upload/manifest/download/delete, `/healthz`, and `webSocketURL(path:)` (used by ProbeAudioTap); `DaemonError`. |
 | `Sources/ProbeKit/AudioUnitDetails.swift` | The cross-repo JSON schema mirror (`AudioUnitDetails` / `AudioUnitComponent` / `ParameterInfo` / `PresetInfo`) + scan report types (`ScanReport` / `ScanResult` / `ScanDevice`) + `fileID` / `sanitizeID`. |
 | `Sources/ProbeKit/AUMSessionModels.swift` | The cross-repo JSON mirror for the session endpoints (`AUMSessionSummary` / `AUMSessionEntry`) and the parsed map (`AUMSessionMap` / `ChannelInfo` / `NodeInfo` / `MappingInfo`). |
 | `Sources/ProbeKit/FourCC.swift` | `FourCharCode` ↔ `String` helpers (shared by the scanner and the extensions' AudioComponent identity). |
@@ -301,9 +308,10 @@ this), shared by both build systems:
 | `Sources/AUv3ProbeApp/AudioUnitInspectorView.swift` | The tap-to-inspect overlay rendering one `AudioUnitDetails` (header, summary, privacy note, group-sectioned lazy parameter list, presets, raw JSON). |
 | **AUM sessions (job 2)** | |
 | `Sources/AUv3ProbeApp/BinaryPlist.swift` / `AUMSessionParser.swift` | On-device read-only NSKeyedArchiver binary-plist decoder + the `.aumproj` → `AUMSessionMap` parser. |
-| `Sources/AUv3ProbeApp/AUMFolderBookmark.swift` | Security-scoped bookmark for the linked AUM folder. |
-| `Sources/AUv3ProbeApp/AUMSessionsModel.swift` | `ObservableObject` state (upload, manifest, download/export, inspect); `AUMSessionRowStatus`. |
-| `Sources/AUv3ProbeApp/AUMSessionsView.swift` | The AUM-sessions **signalwave** ferry: upload `.aumproj`, manifest list with per-row inspect + download, and the inspector `.sheet`. |
+| `Sources/AUv3ProbeApp/AUMFolderBookmark.swift` | Security-scoped bookmark for the linked AUM folder: enumerate/read/write under the folder's scope; the share-sheet fallback. |
+| `Sources/AUv3ProbeApp/AUMSyncEngine.swift` | The device ↔ controller mirror: persisted sync index, rev-gated manifest poll, diff → push/pull plan, conflict states, inbox. |
+| `Sources/AUv3ProbeApp/AUMSessionsModel.swift` | `ObservableObject` for the user actions: inspect (on-device parse), open-in-AUM Universal Link, share fallback, controller-side deletes. |
+| `Sources/AUv3ProbeApp/AUMSessionsView.swift` | The AUM-sessions **signalwave** browser: folder drill-down with sync badges, pinned folder, inbox strip, controller footer, and the inspector `.sheet`. |
 | `Sources/AUv3ProbeApp/AUMSessionInspectorView.swift` | The inspector rendering one `AUMSessionMap` (header, summary, channel→node tree, mappings, raw JSON). |
 | **AUv3 extensions (job 3)** | see [auv3-extension.md](auv3-extension.md) |
 | `Sources/ProbeMidiBrain/` | `aumi` MIDI processor: `ProbeMidiBrainAU` (AU) + `BrainEngine` (realtime core) + `BrainController` (`/midi-control` WebSocket client) + `ControlSurface` (daemon-pushed `controlSurface` manifest, cached in `fullState`) + `ProbeMidiBrainViewController` (factory) + `ProbeMidiBrainView` (authoring UI + the rendered control surface). |
