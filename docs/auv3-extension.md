@@ -263,6 +263,10 @@ consumes the contract.
            "values": [ { "label": "unmute", "value": 0 },
                        { "label": "mute",   "value": 127 } ] }
        ] }
+     ],
+     "sessions": [
+       { "name": "my-set",    "program": 0, "channel": 16, "current": true },
+       { "name": "other-set", "program": 1, "channel": 16 }
      ]
    }
    ```
@@ -278,8 +282,27 @@ consumes the contract.
    round-trip, so the surface keeps working when the daemon is offline. Frame
    types the brain does not know are silently dropped, so the protocol extends
    backward-compatibly in both directions.
-3. **Brain → daemon:** nothing on the data path (inbound messages are ignored).
-   Connect / disconnect is observed daemon-side and surfaced via `NotifyMidiControl`.
+
+   `sessions` (optional; absent on older daemons) is the daemon's session-switch
+   registry: one entry per registered session, each pinned to a Program Change
+   (`program`, 0..127) on the reserved session-switch `channel` (1-based);
+   `current` marks the daemon's current session. The UI renders it as a switcher
+   row above the device rack — see the `sessionSwitch` frame below for what a
+   tap does.
+3. **Brain → daemon — `sessionSwitch` frame**, the only upstream message:
+
+   ```json
+   { "type": "sessionSwitch", "program": 3 }
+   ```
+
+   Sent when a session-switcher row is tapped. The brain has already emitted the
+   pinned Program Change into AUM locally (surface ring → AUM's hand-mapped
+   global "Session Load"), so the switch works with the daemon offline; the
+   frame just tells the daemon to follow — update its current session, re-import
+   the rig, re-push the manifest. Best-effort: with no daemon connected the
+   frame is simply not sent, and the daemon re-syncs on its next connect.
+   Beyond that, connect / disconnect is observed daemon-side and surfaced via
+   `NotifyMidiControl`.
 
 The brain converts each command frame into a `MidiCommand` and enqueues it for
 the render thread (see realtime-safety, above).

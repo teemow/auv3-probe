@@ -21,11 +21,45 @@ public struct ControlSurfaceDescriptor: Codable, Hashable, Sendable {
     /// The session's human title (nil when untitled).
     public var title: String?
     public var devices: [Device]
+    /// The daemon's session-switch registry: one entry per registered session,
+    /// pinned to a Program Change on the reserved session-switch channel.
+    /// Rendered as the switcher row above the device rack (tap semantics live
+    /// in BrainController's sessionSwitch wire contract). nil/empty when the
+    /// daemon has nothing registered (older daemons never send the key).
+    public var sessions: [Session]?
 
-    public init(session: String, title: String? = nil, devices: [Device]) {
+    public init(session: String, title: String? = nil, devices: [Device],
+                sessions: [Session]? = nil) {
         self.session = session
         self.title = title
         self.devices = devices
+        self.sessions = sessions
+    }
+
+    /// One registered cross-session switch: tapping it loads `name` via the
+    /// pinned Program Change.
+    public struct Session: Codable, Hashable, Sendable {
+        public var name: String
+        public var program: Int
+        /// 1-based, like `Msg.channel`.
+        public var channel: Int
+        /// Marks the daemon's current session (the one this manifest was
+        /// derived from / last switched to). Optional on the wire.
+        public var current: Bool?
+
+        public init(name: String, program: Int, channel: Int, current: Bool? = nil) {
+            self.name = name
+            self.program = program
+            self.channel = channel
+            self.current = current
+        }
+
+        public var isCurrent: Bool { current ?? false }
+
+        /// The Program Change this switch emits into AUM.
+        public var command: MidiCommand? {
+            Msg(type: "pc", channel: channel, number: program).command(value: 0)
+        }
     }
 
     /// One session-derived device (the session device or one hosted AUv3 node)

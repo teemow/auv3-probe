@@ -27,11 +27,20 @@ import ProbeKit
 //       {"type":"controlSurface","session":"...","title":"...","devices":[...]}
 //     Decoded into ControlSurfaceDescriptor and handed to `onControlSurface`
 //     (the AU caches it in fullState and the plugin UI renders it).
+//   - brain -> daemon TEXT frames (the only upstream message): the session
+//     switcher row was tapped, the brain already emitted the Program Change
+//     into AUM locally, and the daemon should follow (update its current
+//     session, re-import, re-push):
+//       {"type":"sessionSwitch","program":3}
+//     Best-effort sync — with the daemon offline the local PC still switches
+//     the session, and the daemon re-syncs on the next download/connect.
 final class BrainController {
     private let ring: MidiCommandRing
     private let socket: ReconnectingWebSocket
     // Reused across frames (decoding runs only on the socket's serial queue).
     private let decoder = JSONDecoder()
+    // The live task, for upstream sends. Touched only on the socket's queue.
+    private var task: URLSessionWebSocketTask?
 
     /// Called (on the socket's queue) with each decoded control-surface
     /// manifest the daemon pushes. Set by the AU before `start()`.
@@ -42,6 +51,8 @@ final class BrainController {
         self.socket = ReconnectingWebSocket(path: "midi-control",
                                             label: "com.teemow.auv3probe.braincontroller")
         socket.onReceive = { [weak self] message in self?.handle(message) }
+        socket.onConnect = { [weak self] task in self?.task = task }
+        socket.onDisconnect = { [weak self] in self?.task = nil }
     }
 
     /// Enable the control channel and keep it connected (auto-reconnecting). The
@@ -49,6 +60,16 @@ final class BrainController {
     func start() { socket.start() }
 
     func stop() { socket.stop() }
+
+    /// Send the upstream sessionSwitch frame (see the wire contract above).
+    /// Fire-and-forget: with no daemon connected the frame is simply not sent.
+    func sendSessionSwitch(program: Int) {
+        socket.queue.async { [weak self] in
+            guard let task = self?.task else { return }
+            let frame = #"{"type":"sessionSwitch","program":\#(program)}"#
+            task.send(.string(frame)) { _ in } // drop send errors (best-effort)
+        }
+    }
 
     /// Decode one inbound frame and enqueue it. Called on the socket's queue.
     private func handle(_ message: URLSessionWebSocketTask.Message) {
