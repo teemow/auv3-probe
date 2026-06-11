@@ -130,6 +130,13 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         _ = engine.surfaceRing.push(command)
     }
 
+    /// Forward a locally triggered session switch to the daemon (see
+    /// BrainController's sessionSwitch contract). A best-effort no-op while the
+    /// control channel is down or render resources are not allocated.
+    public func notifySessionSwitch(program: Int) {
+        control.withLock { $0.controller?.sendSessionSwitch(program: program) }
+    }
+
     /// The engine's mirrored status, for the UI to poll.
     public var status: BrainStatus {
         BrainStatus(

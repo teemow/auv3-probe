@@ -770,6 +770,47 @@ private struct SurfaceEnumSelector: View {
     }
 }
 
+// MARK: - Session switch button
+
+/// One registered session in the cross-session switcher row; the daemon's
+/// current session is lit solid. AUM reloading the session reloads this AU
+/// too, so the fresh manifest (with the new `current`) arrives via fullState /
+/// the re-push — no local highlight state to manage.
+struct SessionSwitchButton: View {
+    let session: ControlSurfaceDescriptor.Session
+    let model: BrainViewModel
+
+    var body: some View {
+        Button {
+            model.switchSession(session)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: session.isCurrent ? "rectangle.stack.fill" : "rectangle.stack")
+                    .font(.caption)
+                Text(session.name)
+                    .font(Signalwave.mono(.caption2, weight: .semibold))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                Text("pc \(session.program)")
+                    .font(Signalwave.mono(.caption2))
+                    .opacity(0.7)
+            }
+            .padding(.horizontal, 6)
+            .frame(width: 92, height: 64)
+            .foregroundStyle(session.isCurrent ? Signalwave.bg : Signalwave.green)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(session.isCurrent ? Signalwave.green : Signalwave.bg)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(Signalwave.green.opacity(session.isCurrent ? 1 : 0.5), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Pads (trigger / preset)
 
 /// A momentary pad for one-shot controls: dark at rest, fully lit while

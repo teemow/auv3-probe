@@ -73,6 +73,15 @@ final class BrainViewModel: ObservableObject {
         }
     }
 
+    /// Switch AUM to a registered session: emit the pinned Program Change
+    /// locally via the surface ring, then notify the daemon so it follows
+    /// (full story in BrainController's sessionSwitch wire contract).
+    func switchSession(_ session: ControlSurfaceDescriptor.Session) {
+        guard let cmd = session.command else { return }
+        audioUnit.sendSurfaceCommand(cmd)
+        audioUnit.notifySessionSwitch(program: session.program)
+    }
+
     /// Fire the reporter's on-demand capture (the UI's "dump" button) and mirror
     /// the fresh snapshot. A no-op for the view if the reporter is not yet running.
     func captureIntrospection() {
@@ -275,6 +284,11 @@ public struct ProbeMidiBrainView: View {
                     // surface changes — including a re-import of the same
                     // session with different mappings.
                     VStack(alignment: .leading, spacing: 10) {
+                        // The session switcher sits above the device rack: one
+                        // button per registered session, the current one lit.
+                        if let sessions = surface.sessions, !sessions.isEmpty {
+                            sessionSwitcherRow(sessions)
+                        }
                         ForEach(Array(surface.devices.enumerated()), id: \.offset) { item in
                             SurfaceDeviceModule(device: item.element,
                                                 expandedInitially: surface.devices.count == 1,
@@ -289,6 +303,24 @@ public struct ProbeMidiBrainView: View {
                 }
             }
         }
+    }
+
+    /// The cross-session switcher row: one button per registered session,
+    /// the daemon's current one lit. Taps go through `model.switchSession`.
+    private func sessionSwitcherRow(_ sessions: [ControlSurfaceDescriptor.Session]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("sessions")
+                .font(Signalwave.mono(.caption2, weight: .semibold))
+                .foregroundStyle(Signalwave.dim)
+            WrapLayout(spacing: 8, lineSpacing: 8) {
+                ForEach(Array(sessions.enumerated()), id: \.offset) { item in
+                    SessionSwitchButton(session: item.element, model: model)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .signalField()
     }
 
     private func surfaceLabel(_ surface: ControlSurfaceDescriptor) -> String {
