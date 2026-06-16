@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import ProbeKit
+import AUMSession
 
 // AUMSessionsModel backs the AUM-sessions tab's user actions: inspect a file
 // (on-device parse, no daemon), open a session in AUM via its Universal Link,
