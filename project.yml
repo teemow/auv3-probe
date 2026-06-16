@@ -12,6 +12,11 @@ packages:
   Atomics:
     url: https://github.com/apple/swift-atomics.git
     from: "1.3.0"
+  # On-device AUM .aumproj / .aum_midimap reader, factored out into a standalone
+  # package. Only the app target inspects sessions, so only AUv3Probe links it.
+  AUMSession:
+    url: https://github.com/teemow/aum-session-swift.git
+    from: "0.1.0"
 
 settings:
   base:
@@ -50,6 +55,8 @@ targets:
       - target: ProbeKit
       - target: ProbeMidiBrain
       - target: ProbeAudioTap
+      - package: AUMSession
+        product: AUMSession
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe

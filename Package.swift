@@ -31,6 +31,10 @@ let package = Package(
         // module is iOS 18+). swift-atomics is Apple-maintained and works on
         // both build paths (SwiftPM/xtool here, XcodeGen via project.yml packages).
         .package(url: "https://github.com/apple/swift-atomics.git", from: "1.3.0"),
+        // On-device reader for AUM `.aumproj` / `.aum_midimap` projects, factored
+        // out of this repo into a standalone, testable package. Only the app
+        // target inspects sessions, so only AUv3ProbeApp links it.
+        .package(url: "https://github.com/teemow/aum-session-swift.git", from: "0.1.0"),
     ],
     targets: [
         .target(
@@ -38,7 +42,11 @@ let package = Package(
             dependencies: [.product(name: "Atomics", package: "swift-atomics")],
             path: "Sources/ProbeKit"
         ),
-        .target(name: "AUv3ProbeApp", dependencies: ["ProbeKit"], path: "Sources/AUv3ProbeApp"),
+        .target(
+            name: "AUv3ProbeApp",
+            dependencies: ["ProbeKit", .product(name: "AUMSession", package: "aum-session-swift")],
+            path: "Sources/AUv3ProbeApp"
+        ),
         .target(name: "ProbeMidiBrain", dependencies: ["ProbeKit"], path: "Sources/ProbeMidiBrain"),
         .target(name: "ProbeAudioTap", dependencies: ["ProbeKit"], path: "Sources/ProbeAudioTap"),
     ],
