@@ -21,7 +21,7 @@ packages:
   # ProbeKit depends on it and re-exports it (HostIntrospectionExport.swift).
   AUv3HostIntrospection:
     url: https://github.com/teemow/auv3-host-introspection.git
-    from: "0.1.0"
+    from: "0.1.2"
 
 settings:
   base:
