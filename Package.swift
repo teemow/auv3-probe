@@ -39,7 +39,7 @@ let package = Package(
         // into a standalone package. ProbeKit re-exports it (see
         // HostIntrospectionExport.swift) so the extensions and app reach it
         // through `import ProbeKit`.
-        .package(url: "https://github.com/teemow/auv3-host-introspection.git", from: "0.1.0"),
+        .package(url: "https://github.com/teemow/auv3-host-introspection.git", from: "0.1.2"),
     ],
     targets: [
         .target(
