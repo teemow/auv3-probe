@@ -24,6 +24,11 @@ public final class DiagnosticsChannel: @unchecked Sendable {
     public init(source: String,
                 audioUnit: AUAudioUnit,
                 renderSnapshot: @escaping HostDiagnosticsReporter.RenderSnapshotProvider) {
+        // Pin the os_log subsystem the AUv3HostIntrospection package logs under to
+        // this app's stable id, so the snapshot dump keeps reaching idevicesyslog
+        // on the `com.teemow.auv3probe` channel (the package defaults to the appex
+        // bundle id otherwise). Set before the reporter/streamer can log.
+        HostDiagnostics.logSubsystem = "com.teemow.auv3probe"
         reporter = HostDiagnosticsReporter(source: source,
                                            audioUnit: audioUnit,
                                            logEveryTicks: 0,
