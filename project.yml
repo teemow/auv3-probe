@@ -17,6 +17,11 @@ packages:
   AUMSession:
     url: https://github.com/teemow/aum-session-swift.git
     from: "0.1.0"
+  # AUv3 host/environment introspection, factored out into a standalone package.
+  # ProbeKit depends on it and re-exports it (HostIntrospectionExport.swift).
+  AUv3HostIntrospection:
+    url: https://github.com/teemow/auv3-host-introspection.git
+    from: "0.1.0"
 
 settings:
   base:
@@ -37,6 +42,8 @@ targets:
     dependencies:
       - package: Atomics
         product: Atomics
+      - package: AUv3HostIntrospection
+        product: AUv3HostIntrospection
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeKit

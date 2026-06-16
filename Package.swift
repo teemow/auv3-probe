@@ -35,11 +35,19 @@ let package = Package(
         // out of this repo into a standalone, testable package. Only the app
         // target inspects sessions, so only AUv3ProbeApp links it.
         .package(url: "https://github.com/teemow/aum-session-swift.git", from: "0.1.0"),
+        // AUv3 host/environment introspection snapshot + reporter, factored out
+        // into a standalone package. ProbeKit re-exports it (see
+        // HostIntrospectionExport.swift) so the extensions and app reach it
+        // through `import ProbeKit`.
+        .package(url: "https://github.com/teemow/auv3-host-introspection.git", from: "0.1.0"),
     ],
     targets: [
         .target(
             name: "ProbeKit",
-            dependencies: [.product(name: "Atomics", package: "swift-atomics")],
+            dependencies: [
+                .product(name: "Atomics", package: "swift-atomics"),
+                .product(name: "AUv3HostIntrospection", package: "auv3-host-introspection"),
+            ],
             path: "Sources/ProbeKit"
         ),
         .target(
