@@ -19,6 +19,10 @@ Package.resolved
 # xtool (Linux build/sign/install) output — see docs/building-on-linux.md
 xtool/
 
+# go-ios pairing identity (contains a private key) — written to the current
+# directory when `ios tunnel start` runs without --pair-record-path.
+selfIdentity.plist
+
 # XcodeGen-generated extension Info.plists (see project.yml `info:` blocks); the
 # canonical NSExtension content lives in project.yml + Extensions/*-Info.plist.
 Generated/
