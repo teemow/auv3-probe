@@ -21,7 +21,7 @@ help:
 	@echo
 	@echo "  Linux, no Mac (xtool, see docs/building-on-linux.md):"
 	@echo "    xtool-build  cross-compile the app with xtool (surfaces source errors, no signing)"
-	@echo "    deploy       build -> sign -> install -> launch on the USB-connected device"
+	@echo "    deploy       build -> sign -> install on the USB-connected device (no launch)"
 	@echo "    devices      list devices xtool can see (usbmuxd)"
 	@echo
 	@echo "    clean        remove generated project and all build artifacts"
@@ -59,7 +59,7 @@ devices:
 xtool-build:
 	@$(load_env) xtool dev build
 
-## deploy: build, sign, install, and launch on the USB-connected device
+## deploy: build, sign, and install on the USB-connected device (xtool does not launch it)
 deploy:
 	@$(load_env) xtool dev run --usb
 
