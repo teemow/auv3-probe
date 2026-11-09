@@ -155,9 +155,10 @@ this assumes (Swift toolchain ⇄ SDK version matching, `xtool sdk install`,
 7-day certificate limit, launching the app from Linux on iOS 17+, and
 LAN/firewall notes. `make help` lists all targets.
 
-To launch AUv3 Probe and AUM, take screenshots, and tap buttons by their label
-from Linux, use [`scripts/ipad`](scripts/ipad); see
+To launch AUv3 Probe and AUM, take screenshots, and tap or swipe by label or
+position from Linux, use [`scripts/ipad`](scripts/ipad); see
 [docs/ipad-automation.md](docs/ipad-automation.md).
+[docs/aum-ui-map.md](docs/aum-ui-map.md) maps every AUM screen and how to reach it.
 
 ## Running against the receiver
 

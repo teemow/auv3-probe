@@ -1,7 +1,7 @@
 # Automating the iPad from Linux
 
-Launch AUv3 Probe and AUM, take screenshots, and tap buttons by their
-accessibility label, all from Linux over USB, with no Mac. It builds on
+Launch AUv3 Probe and AUM, take screenshots, and tap, press, or swipe by
+accessibility label or by position, all from Linux over USB, with no Mac. It builds on
 [building-on-linux.md](building-on-linux.md), which installs the app with xtool.
 [`scripts/ipad`](../scripts/ipad) wraps everything below:
 
@@ -9,7 +9,7 @@ accessibility label, all from Linux over USB, with no Mac. It builds on
 scripts/ipad tunnel                      # terminal 1, keep running
 scripts/ipad launch aum
 scripts/ipad screenshot                  # -> ~/.cache/go-ios/screenshots/ipad-<time>.png
-scripts/ipad wda                         # terminal 2, keep running (needed for tap/tree)
+scripts/ipad wda                         # terminal 2, keep running (needed for tap, tree, gestures)
 scripts/ipad tap "LAST STATE" aum        # AUM loads its last session
 ```
 
@@ -18,7 +18,7 @@ scripts/ipad tap "LAST STATE" aum        # AUM loads its last session
 | You want | Needs |
 |---|---|
 | launch an app, screenshot, list apps/processes | the go-ios tunnel |
-| tap or read the UI (`tap`, `tree`) | the tunnel **+** a mounted developer disk image **+** WebDriverAgent installed and running **+** UI Automation enabled, iPad unlocked |
+| tap, press, swipe, or read the UI (`tap`, `tap-at`, `hold`, `swipe`, `size`, `tree`) | the tunnel **+** a mounted developer disk image **+** WebDriverAgent installed and running **+** UI Automation enabled, iPad unlocked |
 
 Launching and screenshots work without a disk image. Only UI automation needs the
 whole stack.
@@ -105,7 +105,7 @@ when WDA starts; iOS may ask for the passcode to allow automation mode.
 
 ```bash
 scripts/ipad tunnel          # terminal 1; Ctrl-C to stop
-scripts/ipad mount-ddi       # once after each iPad restart (only for tap/tree)
+scripts/ipad mount-ddi       # once after each iPad restart (only for WDA commands)
 scripts/ipad wda             # terminal 2; Ctrl-C stops WDA and its port forward
 scripts/ipad status          # tunnel / disk image / WDA
 ```
@@ -121,10 +121,28 @@ scripts/ipad tap "aum sessions" probe        # switch AUv3 Probe's tab
 scripts/ipad tap "LAST STATE" aum            # load AUM's last session
 ```
 
-`tap` and `tree` take the app as their last argument: `probe`, `aum`, or any
-bundle ID. Pass it. In iPadOS windowed multitasking the "active application"
-is SpringBoard, so without an app the tree is the Home Screen's. Labels match
-exactly but case-insensitively, and buttons win over their own text children.
+Where an element has no label, tap or press it by position:
+
+```bash
+scripts/ipad size aum                        # e.g. "1210 x 834 points (landscape)"
+scripts/ipad tap-at 1030 30 aum              # tap a point
+scripts/ipad hold 300 140 aum                # long-press (1.2 s)
+scripts/ipad swipe 1100 560 300 560 aum      # drag, e.g. to scroll AUM's mixer
+```
+
+Coordinates are **points** in the app's current orientation, not screenshot
+pixels: a screenshot has two pixels per point on Retina iPads, so halve its pixel
+coordinates. Apps rotate with the iPad, so check `size` and take a fresh screenshot
+before tapping by position. `tap-at` can hit anything: screenshot first near
+controls that delete or overwrite.
+
+`tap`, `tap-at`, `hold`, `swipe`, `size`, and `tree` take the app as their last
+argument: `probe`, `aum`, or any bundle ID. Pass it. In iPadOS windowed multitasking
+the "active application" is SpringBoard, so without an app the tree is the Home
+Screen's. Labels match exactly but case-insensitively, and buttons win over their
+own text children. A label that sits on a caption next to an icon, rather than on
+the button, taps the caption: `tap` reports success and nothing happens; use
+`tap-at` on the icon instead.
 
 Screenshots and trees show session names, network addresses, and other private
 rig data. They go to `~/.cache/go-ios/screenshots/` by default; keep them out of
@@ -141,10 +159,14 @@ The helper reads these overrides: `GOIOS_HOME` (identity and CA, default
 Useful labels: the tabs `audio units` and `aum sessions`, `resync`, and one
 `inspect <unit name>` button per audio unit.
 
-**AUM** (`com.kymatica.AUM`): its UI is well labelled. The start screen offers
-`LAST STATE` and `DEFAULT`, and channel strips read `<n>: <plugin name>`. Use
-`tree aum` to see the rest. To load a *specific* session without tapping
-through AUM:
+**AUM** (`com.kymatica.AUM`): the start screen offers `LAST STATE` and
+`DEFAULT`; channel titles read `<n>: <plugin name>` (`MIDI <n>` for MIDI strips),
+and mute, solo, and record-arm are `MUTE`, `SOLO`, and `REC`. Popovers and side
+panels are in `tree aum` too, and their list rows tap by label. Most mixer buttons
+and the main menu's icons have no usable label: use `tap-at`.
+[aum-ui-map.md](aum-ui-map.md) maps every AUM screen, where it opens from, the
+top-bar positions, and the gestures that don't come through automation. To load a
+*specific* session without tapping through AUM:
 
 - **AUM's link**, `https://kymatica.com/aum/open/<folder-relative path>.aumproj`,
   which AUv3 Probe opens from its **aum sessions** tab
@@ -163,10 +185,16 @@ through AUM:
   testmanagerd, and `ios forward 8100 8100` exposes its HTTP API on localhost.
   The helper talks to that API directly: it opens a session, finds elements with
   a predicate on `label`, and clicks them.
-- **Session capabilities.** Each `tap`/`tree` session is bound to the app with
+- **Session capabilities.** Each WDA command opens a session bound to the app with
   `bundleId` plus `forceAppLaunch: false` (bring a running app forward; don't
   relaunch it) and `shouldTerminateApp: false`. WDA's default **kills the app
   when the session ends**: AUM would close and drop its loaded session.
+- **No waiting for idle.** Before every action XCTest waits for the app to go idle.
+  An endless animation (AUM spins a slot's icon while its node picker is open)
+  makes each tap wait about 45 s. The helper sets WDA's `waitForIdleTimeout` and
+  `animationCoolOffTimeout` to 0 in every session.
+- **Swipes are W3C touch actions** (down, move over 300 ms, up). WDA's own drag
+  endpoint presses before it moves, which AUM reads as a long-press.
 
 ## Troubleshooting
 
@@ -177,5 +205,8 @@ through AUM:
 | `Timed out while enabling automation mode` | UI Automation off, or iPad locked | enable it (§4), unlock, retry `scripts/ipad wda` |
 | `tap` reports success, then the app is gone | WDA terminated the app when its session ended | use `scripts/ipad tap` (it sets `shouldTerminateApp: false`) |
 | `tree` shows the Home Screen, not the app | session not bound to the app (windowed multitasking) | pass the app: `scripts/ipad tree aum` |
+| `tap` reports success, nothing happens | the label is on a caption, not the button | `scripts/ipad tap-at` on the icon |
+| `tap-at` hits the wrong control | screenshot pixels used as points, or the iPad rotated | halve pixel coordinates; check `scripts/ipad size aum` |
+| every action takes about 45 s | an endless animation and XCTest's idle wait | use `scripts/ipad` (it disables the wait); in your own WDA client set `waitForIdleTimeout` to 0 |
 | `xtool launch`: `DebugserverClient.Error.unknown` | iOS 17+ launch needs the tunnel | `scripts/ipad launch …` |
 | `no installed app matching *…` | app not installed, or device not connected | deploy it (`make deploy`) or install WDA (§3) |

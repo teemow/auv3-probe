@@ -7,6 +7,10 @@
 #   mount-ddi             personalize + mount the developer disk image (after a reboot)
 #   wda                   run WebDriverAgent and forward its port (keep it running)
 #   tap <label> [app]     tap the element with this accessibility label
+#   tap-at <x> <y> [app]  tap a point (in points, not screenshot pixels)
+#   hold <x> <y> [app]    long-press a point for 1.2 s
+#   swipe <x1> <y1> <x2> <y2> [app]  drag from one point to another (scroll)
+#   size [app]            window size in points (tells the orientation)
 #   tree [app]            print the accessibility tree (labels + positions)
 #   status                tunnel / disk image / WebDriverAgent state
 #
@@ -31,7 +35,7 @@ APPLE_ROOT_PEM="$GOIOS_HOME/apple-root.pem"
 die() { echo "ipad: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH (see docs/ipad-automation.md)"; }
 
-usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Run go-ios quietly: it logs JSON to stderr, which is shown only on failure.
 goios() {
@@ -165,13 +169,16 @@ cmd_wda() {
     wait "${WDA_PIDS[0]}" || true
 }
 
-# WebDriverAgent HTTP client: open a session bound to an app, then tap an element
-# by label or print the tree. Labels are matched exactly (case-insensitive).
+# WebDriverAgent HTTP client: open a session bound to an app, then act on it.
+#   wda_client <action> <app bundle ID or ""> [args...]
+# Actions: tree; tap <label>; tap-at <x> <y>; hold <x> <y>; swipe <x1> <y1> <x2> <y2>;
+# size. Labels are matched exactly (case-insensitive). Coordinates are points in the
+# app's current orientation.
 wda_client() {
     python3 -I - "$WDA_URL" "$@" <<'PY'
 import json, sys, time, urllib.request
 
-base, action, app, label = sys.argv[1], sys.argv[2], sys.argv[3], (sys.argv[4] if len(sys.argv) > 4 else "")
+base, action, app, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 
 def call(method, path, body=None):
     data = None if body is None else json.dumps(body).encode()
@@ -179,6 +186,12 @@ def call(method, path, body=None):
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
+
+def point(xs):
+    try:
+        return [float(v) for v in xs]
+    except ValueError:
+        sys.exit(f"ipad: {action} needs numeric coordinates, got {' '.join(xs)!r}")
 
 # Bind the session to the app: in iPadOS windowed multitasking the "active
 # application" is SpringBoard, so queries must be scoped to the bundle ID.
@@ -190,25 +203,56 @@ if app:
     caps.update({"bundleId": app, "forceAppLaunch": False, "shouldTerminateApp": False})
 sid = call("POST", "/session", {"capabilities": {"alwaysMatch": caps}})["sessionId"]
 try:
+    # Don't wait for the app to go idle before each action. An endless animation
+    # (AUM spins the icon of a slot while its node picker is open) otherwise makes
+    # every tap wait for XCTest's idle timeout, about 45 s.
+    call("POST", f"/session/{sid}/appium/settings",
+         {"settings": {"waitForIdleTimeout": 0, "animationCoolOffTimeout": 0}})
     if action == "tree":
         print(call("GET", f"/session/{sid}/source?format=description")["value"])
-        sys.exit(0)
-    # Prefer a button: a button's own text child usually carries the same label.
-    wanted = "label ==[c] " + json.dumps(label)
-    found = []
-    for _ in range(10):
-        for predicate in ("type == 'XCUIElementTypeButton' AND " + wanted, wanted):
-            found = call("POST", f"/session/{sid}/elements", {"using": "predicate string", "value": predicate})["value"]
+    elif action == "size":
+        size = call("GET", f"/session/{sid}/window/size")["value"]
+        w, h = size["width"], size["height"]
+        print(f"{w:g} x {h:g} points ({'landscape' if w > h else 'portrait'})")
+    elif action == "tap-at":
+        x, y = point(args[:2])
+        call("POST", f"/session/{sid}/wda/tap", {"x": x, "y": y})
+        print(f"tapped at {x:g},{y:g}")
+    elif action == "hold":
+        x, y = point(args[:2])
+        call("POST", f"/session/{sid}/wda/touchAndHold", {"x": x, "y": y, "duration": 1.2})
+        print(f"held at {x:g},{y:g}")
+    elif action == "swipe":
+        x1, y1, x2, y2 = point(args[:4])
+        # A W3C touch action: down, move over 300 ms, up. WDA's own drag endpoint
+        # presses first, which AUM reads as a long-press.
+        call("POST", f"/session/{sid}/actions", {"actions": [{
+            "type": "pointer", "id": "finger", "parameters": {"pointerType": "touch"},
+            "actions": [{"type": "pointerMove", "duration": 0, "x": x1, "y": y1},
+                        {"type": "pointerDown", "button": 0},
+                        {"type": "pointerMove", "duration": 300, "x": x2, "y": y2},
+                        {"type": "pointerUp", "button": 0}]}]})
+        print(f"swiped {x1:g},{y1:g} -> {x2:g},{y2:g}")
+    elif action == "tap":
+        label = args[0]
+        # Prefer a button: a button's own text child usually carries the same label.
+        wanted = "label ==[c] " + json.dumps(label)
+        found = []
+        for _ in range(10):
+            for predicate in ("type == 'XCUIElementTypeButton' AND " + wanted, wanted):
+                found = call("POST", f"/session/{sid}/elements", {"using": "predicate string", "value": predicate})["value"]
+                if found:
+                    break
             if found:
                 break
-        if found:
-            break
-        time.sleep(0.5)
-    if not found:
-        sys.exit(f"ipad: no element labelled {label!r} (list the labels with: ipad tree)")
-    eid = found[0].get("ELEMENT") or next(iter(found[0].values()))
-    call("POST", f"/session/{sid}/element/{eid}/click", {})
-    print(f"tapped {label!r}" + (f" ({len(found)} matches, used the first)" if len(found) > 1 else ""))
+            time.sleep(0.5)
+        if not found:
+            sys.exit(f"ipad: no element labelled {label!r} (list the labels with: ipad tree)")
+        eid = found[0].get("ELEMENT") or next(iter(found[0].values()))
+        call("POST", f"/session/{sid}/element/{eid}/click", {})
+        print(f"tapped {label!r}" + (f" ({len(found)} matches, used the first)" if len(found) > 1 else ""))
+    else:
+        sys.exit(f"ipad: unknown WebDriverAgent action {action!r}")
 finally:
     try:
         call("DELETE", f"/session/{sid}")
@@ -217,18 +261,50 @@ finally:
 PY
 }
 
+# Optional trailing app argument (probe, aum, or a bundle ID) after <n> required
+# ones. Callers assign it on its own line so that set -e stops on an unknown app.
+app_arg() {
+    local n=$1; shift
+    if [ $# -gt "$n" ]; then resolve_app "${!#}"; fi
+}
+
 cmd_tap() {
     [ $# -ge 1 ] || die "usage: $0 tap <label> [probe|aum|bundle-id]"
     require_wda
-    local app=""
-    if [ $# -ge 2 ]; then app=$(resolve_app "$2"); fi
+    local app; app=$(app_arg 1 "$@")
     wda_client tap "$app" "$1"
+}
+
+cmd_tap_at() {
+    [ $# -ge 2 ] || die "usage: $0 tap-at <x> <y> [probe|aum|bundle-id]"
+    require_wda
+    local app; app=$(app_arg 2 "$@")
+    wda_client tap-at "$app" "$1" "$2"
+}
+
+cmd_hold() {
+    [ $# -ge 2 ] || die "usage: $0 hold <x> <y> [probe|aum|bundle-id]"
+    require_wda
+    local app; app=$(app_arg 2 "$@")
+    wda_client hold "$app" "$1" "$2"
+}
+
+cmd_swipe() {
+    [ $# -ge 4 ] || die "usage: $0 swipe <x1> <y1> <x2> <y2> [probe|aum|bundle-id]"
+    require_wda
+    local app; app=$(app_arg 4 "$@")
+    wda_client swipe "$app" "$1" "$2" "$3" "$4"
+}
+
+cmd_size() {
+    require_wda
+    local app; app=$(app_arg 0 "$@")
+    wda_client size "$app"
 }
 
 cmd_tree() {
     require_wda
-    local app=""
-    if [ $# -ge 1 ]; then app=$(resolve_app "$1"); fi
+    local app; app=$(app_arg 0 "$@")
     wda_client tree "$app"
 }
 
@@ -252,6 +328,10 @@ case "${1:-}" in
     mount-ddi) shift; cmd_mount_ddi "$@" ;;
     wda) shift; cmd_wda "$@" ;;
     tap) shift; cmd_tap "$@" ;;
+    tap-at) shift; cmd_tap_at "$@" ;;
+    hold) shift; cmd_hold "$@" ;;
+    swipe) shift; cmd_swipe "$@" ;;
+    size) shift; cmd_size "$@" ;;
     tree) shift; cmd_tree "$@" ;;
     status) shift; cmd_status "$@" ;;
     *) usage >&2; exit 2 ;;
