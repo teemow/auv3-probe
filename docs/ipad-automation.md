@@ -1,0 +1,181 @@
+# Automating the iPad from Linux
+
+Launch AUv3 Probe and AUM, take screenshots, and tap buttons by their
+accessibility label, all from Linux over USB, with no Mac. It builds on
+[building-on-linux.md](building-on-linux.md), which installs the app with xtool.
+[`scripts/ipad`](../scripts/ipad) wraps everything below:
+
+```bash
+scripts/ipad tunnel                      # terminal 1, keep running
+scripts/ipad launch aum
+scripts/ipad screenshot                  # -> ~/.cache/go-ios/screenshots/ipad-<time>.png
+scripts/ipad wda                         # terminal 2, keep running (needed for tap/tree)
+scripts/ipad tap "LAST STATE" aum        # AUM loads its last session
+```
+
+## What needs what
+
+| You want | Needs |
+|---|---|
+| launch an app, screenshot, list apps/processes | the go-ios tunnel |
+| tap or read the UI (`tap`, `tree`) | the tunnel **+** a mounted developer disk image **+** WebDriverAgent installed and running **+** UI Automation enabled, iPad unlocked |
+
+Launching and screenshots work without a disk image. Only UI automation needs the
+whole stack.
+
+## One-time setup
+
+### 1. go-ios
+
+Install [go-ios](https://github.com/danielpaulus/go-ios) as `ios` on your
+`PATH` (see [building-on-linux.md §1](building-on-linux.md#1-prerequisites)). The
+helper also needs `curl`, `python3`, and `openssl`.
+
+`scripts/ipad tunnel` keeps go-ios's pairing identity in `~/.config/go-ios`
+(mode 700). The `selfIdentity.plist` there holds a **private key**; never copy it
+into a repository.
+
+### 2. Developer disk image (only for tapping)
+
+On iOS 17+, WebDriverAgent's test service (`com.apple.dt.testmanagerd.remote`)
+only exists once a **personalized** developer disk image is mounted, and the
+image must be recent enough for the device's iOS. Xcode ships it. Without Xcode,
+[doronz88/DeveloperDiskImage](https://github.com/doronz88/DeveloperDiskImage)
+publishes the current one (about 16 MiB):
+
+```bash
+D=~/.cache/go-ios/ddi/Xcode_iOS_DDI_Personalized/Restore
+mkdir -p "$D"
+for f in BuildManifest.plist Image.dmg Image.dmg.trustcache; do
+  curl -fL -o "$D/$f" "https://raw.githubusercontent.com/doronz88/DeveloperDiskImage/main/PersonalizedImages/Xcode_iOS_DDI_Personalized/$f"
+done
+```
+
+To verify the download, compare each file's `git hash-object` with the `sha`
+GitHub lists for it (`gh api repos/doronz88/DeveloperDiskImage/contents/PersonalizedImages/Xcode_iOS_DDI_Personalized`).
+
+Check that the image supports your device. This prints `True` when the device's
+product type is in the manifest:
+
+```bash
+python3 -c 'import plistlib,sys; print(sys.argv[2] in plistlib.load(open(sys.argv[1],"rb"))["SupportedProductTypes"])' \
+  "$D/BuildManifest.plist" "$(ideviceinfo -k ProductType)"
+```
+
+Very new devices may only accept the separate *Cryptex* variant of the image;
+this guide covers only the personalized variant.
+
+`scripts/ipad mount-ddi` has Apple's signing server (`gs.apple.com`) personalize
+the image for the device, then mounts it. The mount lasts until the iPad
+restarts. Many Linux trust stores lack the **Apple Root CA** that anchors
+`gs.apple.com`, so go-ios fails with `x509: certificate signed by unknown
+authority`. The helper fetches the CA once from apple.com, pins it to its
+published SHA-256 fingerprint, stores it in `~/.config/go-ios/apple-root.pem`,
+and passes it to go-ios through a private `SSL_CERT_FILE` bundle. The system
+trust store is never changed.
+
+### 3. WebDriverAgent
+
+Use Appium's unsigned device build of
+[WebDriverAgent](https://github.com/appium/WebDriverAgent/releases), packaged as
+an `.ipa`. xtool signs it with your Apple ID, as it does the app:
+
+```bash
+mkdir -p /tmp/wda/Payload && cd /tmp/wda
+gh release download --repo appium/WebDriverAgent --pattern WebDriverAgentRunner-Runner.zip
+bsdtar -xf WebDriverAgentRunner-Runner.zip -C Payload
+rm -rf Payload/WebDriverAgentRunner-Runner.app/PlugIns/*.dSYM
+zip -qry ~/.cache/go-ios/WebDriverAgentRunner.ipa Payload
+xtool install --usb ~/.cache/go-ios/WebDriverAgentRunner.ipa
+```
+
+It installs as `XTL-<TEAMID>.com.facebook.WebDriverAgentRunner.xctrunner`, and
+the helper finds it by that suffix. Like the app, a free-account signature
+expires after **7 days**: re-run the `xtool install` line, then trust the
+developer again on the iPad if asked
+([building-on-linux.md §8](building-on-linux.md#8-trust-the-app-on-the-device)).
+
+### 4. On the iPad
+
+**Settings → Developer → Enable UI Automation.** Without it, WebDriverAgent
+fails with `Timed out while enabling automation mode`. Keep the iPad unlocked
+when WDA starts; iOS may ask for the passcode to allow automation mode.
+
+## Everyday use
+
+```bash
+scripts/ipad tunnel          # terminal 1; Ctrl-C to stop
+scripts/ipad mount-ddi       # once after each iPad restart (only for tap/tree)
+scripts/ipad wda             # terminal 2; Ctrl-C stops WDA and its port forward
+scripts/ipad status          # tunnel / disk image / WDA
+```
+
+Then:
+
+```bash
+scripts/ipad launch probe                    # AUv3 Probe (add --restart to relaunch)
+scripts/ipad launch aum                      # AUM
+scripts/ipad screenshot                      # or: scripts/ipad screenshot out.png
+scripts/ipad tree aum                        # every element with its label and frame
+scripts/ipad tap "aum sessions" probe        # switch AUv3 Probe's tab
+scripts/ipad tap "LAST STATE" aum            # load AUM's last session
+```
+
+`tap` and `tree` take the app as their last argument: `probe`, `aum`, or any
+bundle ID. Pass it. In iPadOS windowed multitasking the "active application"
+is SpringBoard, so without an app the tree is the Home Screen's. Labels match
+exactly but case-insensitively, and buttons win over their own text children.
+
+Screenshots and trees show session names, network addresses, and other private
+rig data. They go to `~/.cache/go-ios/screenshots/` by default; keep them out of
+this public repository.
+
+The helper reads these overrides: `GOIOS_HOME` (identity and CA, default
+`~/.config/go-ios`), `GOIOS_CACHE` (default `~/.cache/go-ios`), `DDI_DIR`,
+`WDA_PORT` (default 8100), `PROBE_BUNDLE_ID`, and `WDA_BUNDLE_ID`.
+
+## App notes
+
+**AUv3 Probe:** installed under the xtool-prefixed bundle ID
+(`XTL-<TEAMID>.com.teemow.auv3probe`), which the helper resolves on the device.
+Useful labels: the tabs `audio units` and `aum sessions`, `resync`, and one
+`inspect <unit name>` button per audio unit.
+
+**AUM** (`com.kymatica.AUM`): its UI is well labelled. The start screen offers
+`LAST STATE` and `DEFAULT`, and channel strips read `<n>: <plugin name>`. Use
+`tree aum` to see the rest. To load a *specific* session without tapping
+through AUM:
+
+- **AUM's link**, `https://kymatica.com/aum/open/<folder-relative path>.aumproj`,
+  which AUv3 Probe opens from its **aum sessions** tab
+  ([aum-sessions-tab.md](aum-sessions-tab.md)).
+- **MIDI Session Load**: a program change that triggers AUM's global Session
+  Load action, from a session with ProbeMidiBrain routed to MIDI Control
+  ([aum-control-surface.md](aum-control-surface.md)).
+
+## How it works (and the traps the helper handles)
+
+- **The tunnel.** iOS 17+ serves launch, screenshots, and testing only over an
+  encrypted RemoteXPC tunnel. `ios tunnel start --userspace` opens it without
+  root. Check it with `ios tunnel ls`; the userspace tunnel serves nothing on
+  go-ios's default info port 28100.
+- **WebDriverAgent** is an XCTest runner. `ios runwda` starts it through
+  testmanagerd, and `ios forward 8100 8100` exposes its HTTP API on localhost.
+  The helper talks to that API directly: it opens a session, finds elements with
+  a predicate on `label`, and clicks them.
+- **Session capabilities.** Each `tap`/`tree` session is bound to the app with
+  `bundleId` plus `forceAppLaunch: false` (bring a running app forward; don't
+  relaunch it) and `shouldTerminateApp: false`. WDA's default **kills the app
+  when the session ends**: AUM would close and drop its loaded session.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `service 'com.apple.dt.testmanagerd.remote' is not available in RSD` | no (or an outdated) disk image mounted | set up §2, then `scripts/ipad mount-ddi` |
+| `x509: certificate signed by unknown authority` from `gs.apple.com` | Apple Root CA missing from the trust store | `scripts/ipad mount-ddi` pins and supplies it |
+| `Timed out while enabling automation mode` | UI Automation off, or iPad locked | enable it (§4), unlock, retry `scripts/ipad wda` |
+| `tap` reports success, then the app is gone | WDA terminated the app when its session ended | use `scripts/ipad tap` (it sets `shouldTerminateApp: false`) |
+| `tree` shows the Home Screen, not the app | session not bound to the app (windowed multitasking) | pass the app: `scripts/ipad tree aum` |
+| `xtool launch`: `DebugserverClient.Error.unknown` | iOS 17+ launch needs the tunnel | `scripts/ipad launch …` |
+| `no installed app matching *…` | app not installed, or device not connected | deploy it (`make deploy`) or install WDA (§3) |
