@@ -216,8 +216,16 @@ open yet: <https://github.com/xtool-org/xtool/issues/44>.
 running:
 
 ```bash
-ios tunnel start --userspace
+mkdir -p -m 700 ~/.config/go-ios
+ios tunnel start --userspace --pair-record-path="$HOME/.config/go-ios"
 ```
+
+The tunnel pairs with the device using an identity it keeps in
+`selfIdentity.plist`, which holds a **private key**. Without
+`--pair-record-path` go-ios writes that file into the current directory, so
+running it from the repo root would leave the key next to the sources (the
+`.gitignore` excludes it as a backstop). Keep it in `~/.config/go-ios` and reuse
+it across runs.
 
 Then, in another terminal:
 
