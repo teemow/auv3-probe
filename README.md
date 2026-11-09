@@ -155,6 +155,10 @@ this assumes (Swift toolchain ⇄ SDK version matching, `xtool sdk install`,
 7-day certificate limit, launching the app from Linux on iOS 17+, and
 LAN/firewall notes. `make help` lists all targets.
 
+To launch AUv3 Probe and AUM, take screenshots, and tap buttons by their label
+from Linux, use [`scripts/ipad`](scripts/ipad); see
+[docs/ipad-automation.md](docs/ipad-automation.md).
+
 ## Running against the receiver
 
 1. Start `cmd/auv3-probe` from the main repo on a host on the same LAN; it binds

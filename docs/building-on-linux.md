@@ -238,6 +238,11 @@ The bundle ID is the xtool-prefixed one from §6; `xtool ds identifiers list`
 shows it. Stop the tunnel with Ctrl-C when done. A screenshot can show your LAN
 address and session names, so keep it out of the repo.
 
+[`scripts/ipad`](../scripts/ipad) wraps these steps (`scripts/ipad tunnel`,
+`launch probe`, `screenshot`). It can also tap buttons by their label in AUv3
+Probe and AUM through WebDriverAgent; the setup is in
+[ipad-automation.md](ipad-automation.md).
+
 ## 10. Talk to the receiver
 
 The app POSTs each dump to the `cmd/auv3-probe` LAN receiver in the main repo

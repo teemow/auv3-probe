@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# ipad: drive the USB-connected iPad from Linux with go-ios.
+#
+#   tunnel                start the go-ios userspace tunnel (keep it running)
+#   launch <app> [--restart]  launch an app (probe, aum, or a bundle ID)
+#   screenshot [file]     save a screenshot
+#   mount-ddi             personalize + mount the developer disk image (after a reboot)
+#   wda                   run WebDriverAgent and forward its port (keep it running)
+#   tap <label> [app]     tap the element with this accessibility label
+#   tree [app]            print the accessibility tree (labels + positions)
+#   status                tunnel / disk image / WebDriverAgent state
+#
+# One-time setup (go-ios, the disk image, WebDriverAgent, UI Automation) is in
+# docs/ipad-automation.md. Nothing device- or account-specific lives here: bundle
+# IDs are resolved on the device.
+set -euo pipefail
+
+GOIOS_HOME="${GOIOS_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/go-ios}"
+GOIOS_CACHE="${GOIOS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/go-ios}"
+DDI_DIR="${DDI_DIR:-$GOIOS_CACHE/ddi}"
+WDA_PORT="${WDA_PORT:-8100}"
+WDA_URL="http://127.0.0.1:$WDA_PORT"
+
+# Apple Root CA anchors gs.apple.com (Apple's signing server, needed to mount the
+# disk image). Many Linux trust stores lack it, so it is fetched from apple.com
+# once and pinned to its published SHA-256 fingerprint.
+APPLE_ROOT_URL="https://www.apple.com/appleca/AppleIncRootCertificate.cer"
+APPLE_ROOT_SHA256="B0:B1:73:0E:CB:C7:FF:45:05:14:2C:49:F1:29:5E:6E:DA:6B:CA:ED:7E:2C:68:C5:BE:91:B5:A1:10:01:F0:24"
+APPLE_ROOT_PEM="$GOIOS_HOME/apple-root.pem"
+
+die() { echo "ipad: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH (see docs/ipad-automation.md)"; }
+
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# Run go-ios quietly: it logs JSON to stderr, which is shown only on failure.
+goios() {
+    local log rc=0
+    log=$(mktemp)
+    ios "$@" 2>"$log" || rc=$?
+    if [ "$rc" -ne 0 ]; then cat "$log" >&2; fi
+    rm -f "$log"
+    return "$rc"
+}
+
+# State checks capture output first: with pipefail, `| grep -q` can report a
+# false failure when grep exits early and the writer gets SIGPIPE.
+tunnel_up() { local out; out=$(ios tunnel ls 2>/dev/null) || return 1; [[ $out == *'"udid"'* ]]; }
+require_tunnel() { tunnel_up || die "no go-ios tunnel; start one with: $0 tunnel"; }
+wda_ready() { local out; out=$(curl -s --max-time 3 "$WDA_URL/status" 2>/dev/null) || return 1; [[ $out =~ \"ready\"[[:space:]]*:[[:space:]]*true ]]; }
+require_wda() { wda_ready || die "WebDriverAgent is not reachable on $WDA_URL; start it with: $0 wda"; }
+
+# Resolve an app alias to the bundle ID installed on the device. xtool signs
+# with a team prefix (XTL-<TEAMID>.), so the sideloaded apps are matched by
+# suffix. Override with PROBE_BUNDLE_ID / WDA_BUNDLE_ID.
+resolve_app() {
+    case "$1" in
+        aum) echo com.kymatica.AUM ;;
+        probe) installed_id com.teemow.auv3probe "${PROBE_BUNDLE_ID:-}" ;;
+        wda) installed_id com.facebook.WebDriverAgentRunner.xctrunner "${WDA_BUNDLE_ID:-}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+installed_id() {
+    local suffix=$1 override=$2 id
+    if [ -n "$override" ]; then echo "$override"; return; fi
+    id=$(ios apps 2>/dev/null | python3 -I -c '
+import json, sys
+suffix = sys.argv[1]
+data = json.load(sys.stdin)
+apps = data if isinstance(data, list) else data.get("apps", [])
+for app in apps:
+    bid = app.get("CFBundleIdentifier", "")
+    if bid == suffix or bid.endswith("." + suffix):
+        print(bid)
+        break
+' "$suffix") || true
+    [ -n "$id" ] || die "no installed app matching *$suffix (is the device connected and the app installed?)"
+    echo "$id"
+}
+
+cmd_tunnel() {
+    mkdir -p -m 700 "$GOIOS_HOME"
+    tunnel_up && die "a go-ios tunnel is already running"
+    echo "ipad: tunnel starting (identity in $GOIOS_HOME); Ctrl-C to stop" >&2
+    exec ios tunnel start --userspace --pair-record-path="$GOIOS_HOME"
+}
+
+cmd_launch() {
+    [ $# -ge 1 ] || die "usage: $0 launch <probe|aum|bundle-id> [--restart]"
+    require_tunnel
+    local id; id=$(resolve_app "$1")
+    if [ "${2:-}" = "--restart" ]; then
+        goios launch "$id" --kill-existing >/dev/null
+    else
+        goios launch "$id" >/dev/null
+    fi
+    echo "launched $id"
+}
+
+cmd_screenshot() {
+    require_tunnel
+    local out=${1:-$GOIOS_CACHE/screenshots/ipad-$(date +%Y%m%d-%H%M%S).png}
+    mkdir -p "$(dirname "$out")"
+    goios screenshot --output="$out" >/dev/null
+    [ -s "$out" ] || die "screenshot failed"
+    echo "$out"
+}
+
+ensure_apple_root() {
+    [ -s "$APPLE_ROOT_PEM" ] && return
+    need openssl
+    local der; der=$(mktemp)
+    curl -sSfL --max-time 30 -o "$der" "$APPLE_ROOT_URL" || { rm -f "$der"; die "could not fetch $APPLE_ROOT_URL"; }
+    local fp
+    fp=$(openssl x509 -inform DER -in "$der" -noout -fingerprint -sha256 | cut -d= -f2)
+    if [ "$fp" != "$APPLE_ROOT_SHA256" ]; then rm -f "$der"; die "Apple Root CA fingerprint mismatch: $fp"; fi
+    mkdir -p -m 700 "$GOIOS_HOME"
+    openssl x509 -inform DER -in "$der" -out "$APPLE_ROOT_PEM"
+    rm -f "$der"
+}
+
+cmd_mount_ddi() {
+    require_tunnel
+    [ -n "$(find "$DDI_DIR" -path '*/Restore/BuildManifest.plist' -print -quit 2>/dev/null)" ] \
+        || die "no personalized disk image under $DDI_DIR (see docs/ipad-automation.md)"
+    ensure_apple_root
+    local system_ca=""
+    for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+        if [ -s "$f" ]; then system_ca=$f; break; fi
+    done
+    [ -n "$system_ca" ] || die "no system CA bundle found"
+    local bundle; bundle=$(mktemp)
+    cat "$system_ca" "$APPLE_ROOT_PEM" >"$bundle"
+    local rc=0
+    SSL_CERT_FILE="$bundle" goios image auto --basedir="$DDI_DIR" >/dev/null || rc=$?
+    rm -f "$bundle"
+    if [ "$rc" -ne 0 ] || ! ddi_mounted; then die "mounting the disk image failed"; fi
+    echo "disk image mounted"
+}
+
+ddi_mounted() { local out; out=$(ios image list 2>&1) || return 1; [[ $out == *'"signature"'* ]]; }
+
+cmd_wda() {
+    require_tunnel
+    wda_ready && die "WebDriverAgent is already running on $WDA_URL"
+    ddi_mounted || die "no developer disk image mounted; run: $0 mount-ddi"
+    local id; id=$(resolve_app wda)
+    WDA_PIDS=()
+    trap 'kill "${WDA_PIDS[@]}" 2>/dev/null || true' EXIT INT TERM
+    ios runwda --bundleid="$id" --testrunnerbundleid="$id" \
+        --xctestconfig=WebDriverAgentRunner.xctest >/dev/null 2>&1 &
+    WDA_PIDS+=($!)
+    ios forward "$WDA_PORT" 8100 >/dev/null 2>&1 &
+    WDA_PIDS+=($!)
+    local i
+    for i in $(seq 1 90); do
+        wda_ready && break
+        kill -0 "${WDA_PIDS[0]}" 2>/dev/null || die "WebDriverAgent exited; is Settings > Developer > Enable UI Automation on and the iPad unlocked?"
+        sleep 1
+    done
+    wda_ready || die "WebDriverAgent did not become ready within 90 s"
+    echo "ipad: WebDriverAgent ready on $WDA_URL; Ctrl-C to stop" >&2
+    wait "${WDA_PIDS[0]}" || true
+}
+
+# WebDriverAgent HTTP client: open a session bound to an app, then tap an element
+# by label or print the tree. Labels are matched exactly (case-insensitive).
+wda_client() {
+    python3 -I - "$WDA_URL" "$@" <<'PY'
+import json, sys, time, urllib.request
+
+base, action, app, label = sys.argv[1], sys.argv[2], sys.argv[3], (sys.argv[4] if len(sys.argv) > 4 else "")
+
+def call(method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(base + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+
+# Bind the session to the app: in iPadOS windowed multitasking the "active
+# application" is SpringBoard, so queries must be scoped to the bundle ID.
+# forceAppLaunch=false brings a running app forward instead of relaunching it;
+# shouldTerminateApp=false keeps WDA from killing the app when the session ends
+# (its default would close AUM and drop the loaded session).
+caps = {"shouldWaitForQuiescence": False}
+if app:
+    caps.update({"bundleId": app, "forceAppLaunch": False, "shouldTerminateApp": False})
+sid = call("POST", "/session", {"capabilities": {"alwaysMatch": caps}})["sessionId"]
+try:
+    if action == "tree":
+        print(call("GET", f"/session/{sid}/source?format=description")["value"])
+        sys.exit(0)
+    # Prefer a button: a button's own text child usually carries the same label.
+    wanted = "label ==[c] " + json.dumps(label)
+    found = []
+    for _ in range(10):
+        for predicate in ("type == 'XCUIElementTypeButton' AND " + wanted, wanted):
+            found = call("POST", f"/session/{sid}/elements", {"using": "predicate string", "value": predicate})["value"]
+            if found:
+                break
+        if found:
+            break
+        time.sleep(0.5)
+    if not found:
+        sys.exit(f"ipad: no element labelled {label!r} (list the labels with: ipad tree)")
+    eid = found[0].get("ELEMENT") or next(iter(found[0].values()))
+    call("POST", f"/session/{sid}/element/{eid}/click", {})
+    print(f"tapped {label!r}" + (f" ({len(found)} matches, used the first)" if len(found) > 1 else ""))
+finally:
+    try:
+        call("DELETE", f"/session/{sid}")
+    except Exception:
+        pass
+PY
+}
+
+cmd_tap() {
+    [ $# -ge 1 ] || die "usage: $0 tap <label> [probe|aum|bundle-id]"
+    require_wda
+    local app=""
+    if [ $# -ge 2 ]; then app=$(resolve_app "$2"); fi
+    wda_client tap "$app" "$1"
+}
+
+cmd_tree() {
+    require_wda
+    local app=""
+    if [ $# -ge 1 ]; then app=$(resolve_app "$1"); fi
+    wda_client tree "$app"
+}
+
+cmd_status() {
+    if tunnel_up; then echo "tunnel:     up"; else echo "tunnel:     down"; fi
+    if tunnel_up && ddi_mounted; then echo "disk image: mounted"; else echo "disk image: not mounted (or no tunnel)"; fi
+    if wda_ready; then echo "wda:        ready on $WDA_URL"; else echo "wda:        not running"; fi
+}
+
+case "${1:-}" in
+    -h|--help|help|"") usage; exit 0 ;;
+esac
+need ios
+need curl
+need python3
+
+case "${1:-}" in
+    tunnel) shift; cmd_tunnel "$@" ;;
+    launch) shift; cmd_launch "$@" ;;
+    screenshot) shift; cmd_screenshot "$@" ;;
+    mount-ddi) shift; cmd_mount_ddi "$@" ;;
+    wda) shift; cmd_wda "$@" ;;
+    tap) shift; cmd_tap "$@" ;;
+    tree) shift; cmd_tree "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    *) usage >&2; exit 2 ;;
+esac
