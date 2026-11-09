@@ -146,13 +146,14 @@ the same `Sources/`, and the Makefile drives it:
 
 ```bash
 make devices       # confirm the device is connected (usbmuxd)
-make deploy        # build -> sign -> install -> launch over USB
+make deploy        # build -> sign -> install over USB (launch: see the doc)
 ```
 
 See [docs/building-on-linux.md](docs/building-on-linux.md) for the one-time setup
 this assumes (Swift toolchain ⇄ SDK version matching, `xtool sdk install`,
 `xtool auth login`), plus the Inter-App Audio entitlement, the free-account
-7-day certificate limit, and LAN/firewall notes. `make help` lists all targets.
+7-day certificate limit, launching the app from Linux on iOS 17+, and
+LAN/firewall notes. `make help` lists all targets.
 
 ## Running against the receiver
 

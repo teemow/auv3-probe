@@ -20,6 +20,14 @@ run on older hardware at all. xtool sidesteps Xcode entirely.
 
 - **usbmuxd + libimobiledevice** (USB device communication). Install from your
   distro's packages and make sure `usbmuxd` is running.
+- **zip** (Info-ZIP). xtool calls the `zip` binary to pack the `.ipa` it
+  installs; without it the install fails with `Could not find executable 'zip'
+  in PATH`. Install it from your distro's packages (Arch: `pacman -S zip`).
+- **[go-ios](https://github.com/danielpaulus/go-ios)** *(optional)* — only
+  needed to **launch** the app or take a screenshot from Linux on iOS 17+ (§9).
+  Download `go-ios-linux.zip` from its
+  [releases](https://github.com/danielpaulus/go-ios/releases/latest) and put the
+  `ios-amd64` (or `ios-arm64`) binary on your `PATH` as `ios`.
 - **xtool**: download the latest `xtool.AppImage` from the
   [releases](https://github.com/xtool-org/xtool/releases/latest), rename it to
   `xtool`, mark it executable, and put it on your `PATH`.
@@ -90,6 +98,18 @@ xtool sdk install ~/path/to/Xcode_<version>.xip   # one-time, multi-GB extract
 swift sdk list                                    # -> darwin
 ```
 
+`swift sdk list` must print `darwin`. SwiftPM searches a **single** SDK
+directory, and it isn't always the one the bundle was installed to: with
+`~/.config/swiftpm` present (and `XDG_CONFIG_HOME` set), Swift 6.2 searches
+`~/.config/swiftpm/swift-sdks`, while a bundle can sit in
+`~/.swiftpm/swift-sdks`. The build then fails with `No valid Swift SDK bundles
+found at <dir>`, naming the directory it searched. Symlink the bundle there
+rather than copying several GB:
+
+```bash
+ln -s ~/.swiftpm/swift-sdks/darwin.artifactbundle ~/.config/swiftpm/swift-sdks/
+```
+
 ## 5. The in-repo xtool layout (already committed)
 
 xtool builds a SwiftPM package (one library product = the app). The four files
@@ -141,12 +161,20 @@ From the **repo root**, the Makefile is the entry point (it sources the toolchai
 ```bash
 make devices       # confirm the iPad appears (usbmuxd)
 make xtool-build   # optional: cross-compile only, surfaces source errors
-make deploy        # build -> sign -> install -> launch over USB
+make deploy        # build -> sign -> install over USB (does not launch)
 ```
 
 `make help` lists every target. Under the hood these run `xtool devices`,
 `xtool dev build`, and `xtool dev run --usb` after sourcing `$(SWIFT_ENV)`
 (default `~/swift-toolchain/env.sh`) — run them by hand if you prefer.
+
+Despite its name, `xtool dev run` only builds, signs and **installs**; it never
+starts the app. Open it from the Home Screen, or launch it from Linux (§9).
+
+**First deploy to a device.** xtool registers the device with your team, and
+Apple may not see it right away: the first attempt can fail with `409 …
+There are no current IOS devices on this team matching the provided device
+IDs.` Re-run `make deploy`; a retry got past it.
 
 **Free-account certificate limit.** Free Apple IDs allow only a small number of
 development certificates. If one already exists, `xtool dev run` will pause and
@@ -171,7 +199,38 @@ First launch is blocked until you trust the developer:
 2. If there's no *Developer App* section, enable **Settings → Privacy &
    Security → Developer Mode** first (the device reboots), then retry.
 
-## 9. Talk to the receiver
+Trust is tied to the signing certificate: after a deploy that issues a new one
+(free accounts: every 7 days), you may need to trust it again.
+
+## 9. Launch and screenshot from Linux (iOS 17+)
+
+`xtool launch` does not work on iOS 17+ — it fails with
+`DebugserverClient.Error.unknown` (and libimobiledevice's `idevicedebug` with
+`Could not start com.apple.debugserver!`), even with Developer Mode on and the
+developer disk image mounted. iOS 17 moved the debug and launch services behind
+an encrypted RemoteXPC tunnel that libimobiledevice, and therefore xtool, cannot
+open yet: <https://github.com/xtool-org/xtool/issues/44>.
+
+[go-ios](https://github.com/danielpaulus/go-ios) can open that tunnel in
+**userspace**, without root. Start the tunnel in one terminal and leave it
+running:
+
+```bash
+ios tunnel start --userspace
+```
+
+Then, in another terminal:
+
+```bash
+ios launch XTL-<TEAMID>.com.teemow.auv3probe --kill-existing   # start (or restart) the app
+ios screenshot --output=ipad.png                               # capture the screen
+```
+
+The bundle ID is the xtool-prefixed one from §6; `xtool ds identifiers list`
+shows it. Stop the tunnel with Ctrl-C when done. A screenshot can show your LAN
+address and session names, so keep it out of the repo.
+
+## 10. Talk to the receiver
 
 The app POSTs each dump to the `cmd/auv3-probe` LAN receiver in the main repo
 (`:7800` by default; `GET /healthz`, `POST /auv3-probe`).
@@ -198,6 +257,10 @@ The app POSTs each dump to the `cmd/auv3-probe` LAN receiver in the main repo
 | `SwiftUI ... this SDK is not supported by the compiler` | toolchain ≠ SDK Swift version | install the matching `swift-x.y-RELEASE` (§2) |
 | missing `.so` (ncurses / libxml2 / ICU) at runtime | distro ships newer sonames | add the lib to `compat-libs` (§3) |
 | `sending '...' risks causing data races` | Swift 6 strict concurrency on Swift-5 code | `swiftLanguageModes: [.v5]` in `Package.swift` |
+| `No valid Swift SDK bundles found at …/swiftpm/swift-sdks` | Darwin SDK bundle is not in the directory SwiftPM searches | symlink it into the directory the error names (§4) |
+| `Could not find executable 'zip' in PATH` | `zip` not installed | install `zip` from your distro (§1) |
+| `409 … no current IOS devices on this team` | device registration not visible yet on first deploy | re-run `make deploy` (§7) |
 | `xtool dev run` seems to hang forever | waiting on the interactive revoke prompt | run in a real TTY and answer it (§7) |
+| `xtool launch`: `DebugserverClient.Error.unknown` | iOS 17+ launch needs a RemoteXPC tunnel | launch with go-ios (§9) |
 | only Apple `AU*` units listed, no third-party | missing Inter-App Audio entitlement | add `inter-app-audio` (§5, [auv3-discovery.md](auv3-discovery.md)) |
-| "could not connect to the server" | host firewall dropping the port | allow the receiver port from the LAN (§9) |
+| "could not connect to the server" | host firewall dropping the port | allow the receiver port from the LAN (§10) |
