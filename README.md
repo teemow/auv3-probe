@@ -236,8 +236,10 @@ The ferry is purely additive — listing and inspecting always work offline.
 
 `.github/workflows/ci.yaml` runs on a GitHub-hosted `macos-latest` runner
 (free for public repos): it installs XcodeGen, generates the project, runs
-`xcodebuild ... build CODE_SIGNING_ALLOWED=NO`, then runs the `ProbeKitTests`
-unit tests (`Tests/ProbeKitTests`) on an iOS simulator with `xcodebuild test`.
+`xcodebuild ... build CODE_SIGNING_ALLOWED=NO`, then runs the unit tests on an
+iOS simulator with `xcodebuild test`: `ProbeKitTests` (`Tests/ProbeKitTests`,
+ProbeKit's pure logic) and `ProbeMidiBrainTests` (`Tests/ProbeMidiBrainTests`,
+the brain's audio unit and view model, built from the extension's sources).
 It does not depend on any personal machine. If you later want CI to sign and install to
 a device, add a self-hosted macOS runner.
 

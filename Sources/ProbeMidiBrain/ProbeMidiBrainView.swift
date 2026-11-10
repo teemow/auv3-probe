@@ -9,7 +9,18 @@ import ProbeKit
 @MainActor
 final class BrainViewModel: ObservableObject {
     private let audioUnit: ProbeMidiBrainAU
-    @Published var program: BrainProgram
+    /// The program on screen. An edit goes to the audio unit at once, so this
+    /// copy differs from `audioUnit.program` only after the host restored a
+    /// state, which `poll` then adopts.
+    @Published var program: BrainProgram {
+        didSet {
+            guard !adoptingRestoredProgram, program != oldValue else { return }
+            audioUnit.updateProgram(program)
+        }
+    }
+    /// Set while `poll` takes over the audio unit's program, so that is not
+    /// written back as if it were an edit.
+    private var adoptingRestoredProgram = false
     @Published var status: BrainStatus
     /// Rolling tally of every inbound MIDI event AUM routes into the node.
     @Published var observed = ObservedMidiSummary()
@@ -38,7 +49,8 @@ final class BrainViewModel: ObservableObject {
 
     deinit { timer?.invalidate() }
 
-    private func poll() {
+    /// Mirror the audio unit's state (timer-driven; internal for the tests).
+    func poll() {
         status = audioUnit.status
         observed = audioUnit.pollObservedMIDI()
         introspection = audioUnit.latestDiagnostics
@@ -46,6 +58,17 @@ final class BrainViewModel: ObservableObject {
         // import / load) and republishing every tick would rebuild the panel.
         let latest = audioUnit.controlSurface
         if latest != surface { surface = latest }
+        // The host restores the program whenever it likes. AUM does it after
+        // creating the unit, and iOS may have built this view by then: without
+        // this, the window keeps listing the program the unit started with
+        // (the demo), and the next edit in it would write that over the
+        // restored one.
+        let restored = audioUnit.program
+        if restored != program {
+            adoptingRestoredProgram = true
+            program = restored
+            adoptingRestoredProgram = false
+        }
     }
 
     // MARK: - Control surface (local emission, no daemon round-trip)
@@ -96,30 +119,25 @@ final class BrainViewModel: ObservableObject {
         observed = audioUnit.pollObservedMIDI()
     }
 
-    /// Push the current program into the realtime engine.
-    func commit() { audioUnit.updateProgram(program) }
+    // The edits below reach the audio unit through `program`'s didSet.
 
     func addSection() {
         let nextBeat = (program.sections.map(\.startBeat).max() ?? -4) + 4
         let nextScene = (program.sections.map(\.scene).max() ?? -1) + 1
         program.sections.append(SongSection(name: "section \(program.sections.count + 1)",
                                              startBeat: max(0, nextBeat), scene: max(0, nextScene)))
-        commit()
     }
 
     func removeSection(_ id: UUID) {
         program.sections.removeAll { $0.id == id }
-        commit()
     }
 
     func addFootswitch() {
         program.footswitches.append(FootswitchMapping(kind: .controlChange, number: 64, channel: 0, action: .next))
-        commit()
     }
 
     func removeFootswitch(_ id: UUID) {
         program.footswitches.removeAll { $0.id == id }
-        commit()
     }
 
 #if DEBUG
@@ -185,7 +203,6 @@ public struct ProbeMidiBrainView: View {
         .background(Signalwave.bg.ignoresSafeArea())
         .tint(Signalwave.green)
         .preferredColorScheme(.dark)
-        .onChange(of: model.program) { _ in model.commit() }
     }
 
     // MARK: - Diagnostics (collapsible, monitoring only)

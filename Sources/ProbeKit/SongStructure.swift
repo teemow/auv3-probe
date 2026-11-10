@@ -167,6 +167,26 @@ public struct BrainProgram: Codable, Equatable, Sendable {
         )
     }
 
+    // MARK: - fullState (how a host stores the program in its session)
+
+    /// Key under which the program sits inside the AU's `fullState`: JSON bytes,
+    /// which AUM keeps in the node's `AuStateDoc`. The daemon authors the same
+    /// key into the sessions it writes, so keep the two in sync.
+    public static let fullStateKey = "probeMidiBrainProgram"
+
+    /// The program a host handed back in `fullState`, or nil when the state
+    /// carries none (a state saved before any program existed, or one that only
+    /// holds the component identity) or one that does not decode.
+    public static func restored(fromFullState state: [String: Any]?) -> BrainProgram? {
+        guard let data = state?[fullStateKey] as? Data else { return nil }
+        return try? JSONDecoder().decode(BrainProgram.self, from: data)
+    }
+
+    /// The program as stored under `fullStateKey`.
+    public var fullStateData: Data? {
+        try? JSONEncoder().encode(self)
+    }
+
     /// The sections sorted by start position — the order the evaluator walks.
     public var orderedSections: [SongSection] {
         sections.sorted { $0.startBeat < $1.startBeat }
