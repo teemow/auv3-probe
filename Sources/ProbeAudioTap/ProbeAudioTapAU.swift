@@ -10,7 +10,7 @@ import ProbeKit
 // giving an AI agent "ears" on the rig.
 //
 // Realtime work lives in TapDSP; networking lives in TapStreamer. This class is
-// the AUAudioUnit shell: busses, config (streaming flag) persisted in
+// the AUAudioUnit shell: busses, config (streaming flag and name) persisted in
 // fullState, and lifecycle wiring of the streamer.
 @objc(ProbeAudioTapAU)
 public final class ProbeAudioTapAU: AUAudioUnit {
@@ -69,11 +69,13 @@ public final class ProbeAudioTapAU: AUAudioUnit {
 
     /// Apply the streaming on/off state. Must be called with `control` held.
     /// The host comes from Bonjour discovery (DaemonDiscovery), so the streamer
-    /// finds the daemon itself and auto-reconnects.
+    /// finds the daemon itself and auto-reconnects. The stream is opened under
+    /// the config's name, so a restore that brings one makes the tap dial
+    /// again as that name.
     private func applyStreamingStateLocked(_ state: inout ControlState) {
         if state.config.streaming, let streamer = state.streamer {
             dsp.capturing.store(true, ordering: .relaxed)
-            streamer.start()
+            streamer.start(name: state.config.streamName)
         } else {
             dsp.capturing.store(false, ordering: .relaxed)
             state.streamer?.stop()
@@ -133,8 +135,8 @@ public final class ProbeAudioTapAU: AUAudioUnit {
     public override var fullState: [String: Any]? {
         get {
             var state = super.fullState ?? [:]
-            // Persist the tap's config (streaming flag + decimation) inside the
-            // AUM session, per node. The daemon host is not stored here — it is
+            // Persist the tap's config (streaming flag + name) inside the AUM
+            // session, per node. The daemon host is not stored here — it is
             // found via Bonjour discovery (DaemonDiscovery).
             if let data = config.fullStateData {
                 state[TapConfig.fullStateKey] = data
@@ -155,15 +157,31 @@ public final class ProbeAudioTapAU: AUAudioUnit {
 /// Persisted configuration for ProbeAudioTap.
 ///
 /// The host is not stored here — the daemon is found via Bonjour discovery
-/// (DaemonDiscovery). Only the streaming flag is per-node `fullState`. (A `host`
-/// or legacy `decimation` left over in an older session's JSON is simply ignored
-/// on decode.)
+/// (DaemonDiscovery). The streaming flag and the name are per-node `fullState`.
+/// (A `host` or legacy `decimation` left over in an older session's JSON is
+/// simply ignored on decode, and a session from before taps had names decodes
+/// to a tap without one.)
 public struct TapConfig: Codable, Equatable {
     /// Whether the tap is actively streaming.
     public var streaming: Bool
 
-    public init(streaming: Bool = true) {
+    /// What the tap calls itself when it dials the daemon, nil for a tap
+    /// without a name. The daemon writes it into the sessions it authors (the
+    /// session and the strip the tap sits on), and by it tells the streams of
+    /// a session's taps apart.
+    public var name: String?
+
+    public init(streaming: Bool = true, name: String? = nil) {
         self.streaming = streaming
+        self.name = name
+    }
+
+    /// The name as the tap sends it: without surrounding whitespace, and nil
+    /// when nothing is left.
+    public var streamName: String? {
+        guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     // MARK: - fullState (how a host stores the config in its session)

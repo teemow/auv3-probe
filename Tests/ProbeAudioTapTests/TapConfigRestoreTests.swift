@@ -5,7 +5,8 @@ import ProbeKit
 // A host restores the tap's config through `fullState` whenever it likes. AUM
 // does it right after creating the unit, and by then iOS may already have built
 // the plugin's view. These tests drive the real audio unit and its view model
-// the way a host does: create, maybe open the window, restore.
+// the way a host does: create, maybe open the window, restore. The config
+// carries whether the tap streams and the name it streams under.
 //
 // An app extension cannot be imported, so project.yml compiles the extension's
 // sources into this bundle.
@@ -80,6 +81,79 @@ final class TapConfigRestoreTests: XCTestCase {
         XCTAssertEqual(loaded.config, TapConfig(streaming: false))
     }
 
+    // MARK: - The name
+
+    func testAFreshTapHasNoName() throws {
+        let tap = try makeTap()
+        XCTAssertNil(tap.config.name)
+        XCTAssertNil(tap.config.streamName)
+    }
+
+    /// What the daemon authors for a tap of a song's session: the session and
+    /// the strip the tap sits on.
+    func testRestoringASessionAppliesItsName() throws {
+        let tap = try makeTap()
+        tap.fullState = sessionState(config: #"{"streaming":true,"name":"Songs/Night Drive/master"}"#)
+        XCTAssertEqual(tap.config, TapConfig(streaming: true, name: "Songs/Night Drive/master"))
+    }
+
+    /// A session from before taps had names decodes, and to a tap without one:
+    /// the name belongs to the session, so one restored earlier does not stay.
+    func testAnOlderSessionWithoutANameStillDecodes() throws {
+        let tap = try makeTap()
+        tap.fullState = sessionState(config: #"{"streaming":true,"name":"Songs/Night Drive/master"}"#)
+
+        tap.fullState = sessionState(config: #"{"streaming":false}"#)
+        XCTAssertEqual(tap.config, TapConfig(streaming: false, name: nil))
+    }
+
+    func testTheSavedStateKeepsTheName() throws {
+        let saved = try makeTap()
+        saved.updateConfig(TapConfig(streaming: true, name: "Songs/Night Drive/bass"))
+
+        let loaded = try makeTap()
+        loaded.fullState = try XCTUnwrap(saved.fullState)
+        XCTAssertEqual(loaded.config, TapConfig(streaming: true, name: "Songs/Night Drive/bass"))
+    }
+
+    /// A tap without a name saves the config an earlier build wrote.
+    func testATapWithoutANameSavesNoNameKey() throws {
+        let data = try XCTUnwrap(TapConfig(streaming: true).fullStateData)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Array(json.keys), ["streaming"])
+    }
+
+    func testANameOfOnlyWhitespaceIsNoName() {
+        XCTAssertNil(TapConfig(name: "").streamName)
+        XCTAssertNil(TapConfig(name: " \n").streamName)
+        XCTAssertEqual(TapConfig(name: " Songs/Night Drive/master ").streamName, "Songs/Night Drive/master")
+    }
+
+    // MARK: - What a named tap sends
+
+    /// The daemon keeps the streams of a session's taps apart by the name in
+    /// the path they dial.
+    func testANamedTapDialsUnderItsName() throws {
+        let client = try XCTUnwrap(DaemonClient(host: "192.0.2.10:7800"))
+        let named = client.webSocketURL(path: "audio-stream",
+                                        query: TapStreamer.query(name: "Songs/Night Drive/master"))
+        XCTAssertEqual(named?.absoluteString,
+                       "ws://192.0.2.10:7800/audio-stream?name=Songs%2FNight%20Drive%2Fmaster")
+
+        let unnamed = client.webSocketURL(path: "audio-stream", query: TapStreamer.query(name: nil))
+        XCTAssertEqual(unnamed?.absoluteString, "ws://192.0.2.10:7800/audio-stream")
+    }
+
+    func testTheFormatMessageCarriesTheNameAsItsSource() {
+        let named = TapStreamer.formatMessage(channels: 2, sampleRate: 48_000, name: "Songs/Night Drive/master")
+        XCTAssertEqual(named["source"] as? String, "Songs/Night Drive/master")
+        XCTAssertEqual(named["type"] as? String, "format")
+        XCTAssertEqual(named["channels"] as? Int, 2)
+
+        let unnamed = TapStreamer.formatMessage(channels: 2, sampleRate: 48_000, name: nil)
+        XCTAssertEqual(unnamed["source"] as? String, "ProbeAudioTap")
+    }
+
     // MARK: - The window
 
     /// The defect: the host restored a stopped tap, the button went on reading
@@ -111,6 +185,22 @@ final class TapConfigRestoreTests: XCTestCase {
 
         model.config.streaming.toggle()
         XCTAssertTrue(tap.config.streaming)
+    }
+
+    /// The name comes with the session, after the window may be up already.
+    @MainActor
+    func testAnOpenWindowShowsTheRestoredName() throws {
+        let tap = try makeTap()
+        let model = TapViewModel(audioUnit: tap)
+        XCTAssertNil(model.name)
+
+        tap.fullState = sessionState(config: #"{"streaming":true,"name":"Songs/Night Drive/master"}"#)
+        model.poll()
+        XCTAssertEqual(model.name, "Songs/Night Drive/master")
+
+        // The button changes the streaming flag and leaves the name alone.
+        model.config.streaming.toggle()
+        XCTAssertEqual(tap.config, TapConfig(streaming: false, name: "Songs/Night Drive/master"))
     }
 
     /// One tap on the button of a window that was open across a restore must

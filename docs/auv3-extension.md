@@ -192,8 +192,25 @@ only if profiling shows glitches."*
 ## Audio-stream protocol (the wire contract)
 
 ProbeAudioTap → `ws://<host>/audio-stream` (the host's `http`/`https` is mapped to
-`ws`/`wss` by `DaemonClient.webSocketURL(path:)`). The **receiver** side lives in
+`ws`/`wss` by `DaemonClient.webSocketURL(path:query:)`). The **receiver** side lives in
 the `mcp-midi-controller` repo; this repo defines and produces the contract:
+
+0. **The tap's name.** A tap whose config carries a `name` dials
+   `ws://<host>/audio-stream?name=<name>` (percent-encoded down to the
+   unreserved characters) and the daemon keeps its stream under that name, so
+   several taps in one session can be told apart. A tap without a name dials
+   the bare path and the daemon keys it by its remote address. The name is
+   part of the node's saved state, next to the streaming flag:
+
+   ```json
+   { "streaming": true, "name": "<session>/<strip>" }
+   ```
+
+   under the `fullState` key `probeAudioTapConfig`. The daemon writes it into
+   the sessions it authors; a session saved before taps had names has no
+   `name` and restores to a tap without one. The tap's window shows the name.
+   A host may restore the state after the tap began to stream: the tap then
+   dials again under the restored name.
 
 1. **On connect — one TEXT (JSON) format message:**
 
@@ -204,7 +221,8 @@ the `mcp-midi-controller` repo; this repo defines and produces the contract:
 
    `channels` and `sampleRate` are the **host's real** values — the stream is
    full-fidelity (no downmix, no decimation), so a sound engineer can verify the
-   signal up to the host Nyquist and reason about the stereo image.
+   signal up to the host Nyquist and reason about the stereo image. `source`
+   is the tap's name, or `ProbeAudioTap` for a tap without one.
 2. **Audio — BINARY messages:** little-endian `Float32` PCM, **interleaved**
    across channels at the host rate, in chunks (no per-chunk header; the format
    message fixes the channel count and layout).
@@ -424,10 +442,11 @@ via AUv3 `fullState`:
   copy for good: it adopts the unit's program whenever that differs, and writes
   every edit to the unit at once. A state without a program leaves the current
   one in place, which for a new unit is the demo.
-- ProbeAudioTap stores its `TapConfig` (the streaming flag) under
-  `probeAudioTapConfig`. Its window follows the unit in the same way.
+- ProbeAudioTap stores its `TapConfig` (the streaming flag and, when the
+  session gives it one, the tap's name) under `probeAudioTapConfig`. Its
+  window follows the unit in the same way.
 
-So the daemon can author the tap's streaming flag into a `.aumproj` (AUM's
+So the daemon can author the tap's streaming flag and name into a `.aumproj` (AUM's
 per-node `AuStateDoc`) and both extensions come up connected on load — the
 endpoint is discovered, never authored. See the `author_loop_session` MCP tool
 and `mcp-midi-controller`'s `docs/research/aum-midi-matrix.md` / `agent-loop.md`.

@@ -31,6 +31,8 @@ public final class ReconnectingWebSocket: NSObject, URLSessionWebSocketDelegate,
 
     private let path: String
     private let reconnectDelay: TimeInterval
+    // The query the socket dials with (touched only on `queue`).
+    private var query: [URLQueryItem] = []
 
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
@@ -48,10 +50,14 @@ public final class ReconnectingWebSocket: NSObject, URLSessionWebSocketDelegate,
         super.init()
     }
 
-    /// Enable the socket and keep it connected (auto-reconnecting).
-    public func start() {
+    /// Enable the socket and keep it connected (auto-reconnecting). `query`,
+    /// when given, replaces the query items the socket dials with from this
+    /// connection on (a named tap dials `audio-stream?name=<its name>`); nil
+    /// keeps the ones it has.
+    public func start(query newQuery: [URLQueryItem]? = nil) {
         DaemonDiscovery.shared.start()
         queue.async { [self] in
+            if let newQuery { query = newQuery }
             shouldRun = true
             connectLocked()
         }
@@ -73,7 +79,7 @@ public final class ReconnectingWebSocket: NSObject, URLSessionWebSocketDelegate,
         guard shouldRun else { return }
         guard let host = DaemonDiscovery.shared.currentHost,
               let client = DaemonClient(host: host),
-              let url = client.webSocketURL(path: path) else {
+              let url = client.webSocketURL(path: path, query: query) else {
             scheduleReconnectLocked()
             return
         }
