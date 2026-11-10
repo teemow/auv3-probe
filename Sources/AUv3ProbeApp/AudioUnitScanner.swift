@@ -46,12 +46,26 @@ struct DiscoveredAudioUnit: Identifiable, Hashable {
             + "/\(FourCharCode.string(from: desc.componentManufacturer))"
     }
 
+    /// The component identity as the probe reports it (FourCCs as strings plus
+    /// the human-readable extras).
+    var component: AudioUnitComponent {
+        let desc = componentDescription
+        return AudioUnitComponent(
+            type: FourCharCode.string(from: desc.componentType),
+            subtype: FourCharCode.string(from: desc.componentSubType),
+            manufacturer: FourCharCode.string(from: desc.componentManufacturer),
+            manufacturerName: manufacturer.isEmpty ? nil : manufacturer,
+            version: version.isEmpty ? nil : version,
+            typeName: typeName.isEmpty ? nil : typeName,
+            tags: tags.isEmpty ? nil : tags
+        )
+    }
+
     /// The stable id the daemon uses to name staged files. Mirrors
     /// `AudioUnitDetails.fileID` so a failed read (which produces no details)
     /// reports the same id as a successful one would.
     var fileID: String {
-        let subtype = FourCharCode.string(from: componentDescription.componentSubType)
-        return AudioUnitDetails.sanitizeID(subtype.isEmpty ? name : subtype)
+        AudioUnitDetails.probeID(component: component, name: name)
     }
 
     // AudioComponentDescription is not Hashable/Equatable, so key both off the
@@ -115,16 +129,7 @@ enum AudioUnitScanner {
             parameters = flatten(tree)
         }
 
-        let desc = unit.componentDescription
-        let component = AudioUnitComponent(
-            type: FourCharCode.string(from: desc.componentType),
-            subtype: FourCharCode.string(from: desc.componentSubType),
-            manufacturer: FourCharCode.string(from: desc.componentManufacturer),
-            manufacturerName: unit.manufacturer.isEmpty ? nil : unit.manufacturer,
-            version: unit.version.isEmpty ? nil : unit.version,
-            typeName: unit.typeName.isEmpty ? nil : unit.typeName,
-            tags: unit.tags.isEmpty ? nil : unit.tags
-        )
+        let component = unit.component
 
         let presets = (auUnit.factoryPresets ?? []).map {
             PresetInfo(number: $0.number, name: $0.name)

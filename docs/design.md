@@ -292,7 +292,7 @@ this), shared by both build systems:
 | `Sources/ProbeKit/DaemonDiscovery.swift` | Bonjour/mDNS discovery of `mcp-midi-controller` (`_mcpmidi._tcp`): resolves `host:port`, reads version/capabilities from the TXT record, polls `healthz`. The single host source for the app and both extensions. |
 | `Sources/ProbeKit/DaemonStatusView.swift` | The one status element shared verbatim by all three surfaces (app + both AUv3 UIs): discovered IP, connection status, daemon capabilities, and version. |
 | `Sources/ProbeKit/DaemonClient.swift` | The single LAN client to the daemon: audio-unit POSTs (`/auv3-probe`, `/auv3-probe/diagnostics`), AUM-session upload/manifest/download/delete, `/healthz`, and `webSocketURL(path:)` (used by ProbeAudioTap); `DaemonError`. |
-| `Sources/ProbeKit/AudioUnitDetails.swift` | The cross-repo JSON schema mirror (`AudioUnitDetails` / `AudioUnitComponent` / `ParameterInfo` / `PresetInfo`) + scan report types (`ScanReport` / `ScanResult` / `ScanDevice`) + `fileID` / `sanitizeID`. |
+| `Sources/ProbeKit/AudioUnitDetails.swift` | The cross-repo JSON schema mirror (`AudioUnitDetails` / `AudioUnitComponent` / `ParameterInfo` / `PresetInfo`) + scan report types (`ScanReport` / `ScanResult` / `ScanDevice`) + `fileID` / `componentID` / `sanitizeID`. |
 | `Sources/ProbeKit/AUMSessionModels.swift` | The cross-repo JSON mirror for the session endpoints (`AUMSessionSummary` / `AUMSessionEntry`) and the parsed map (`AUMSessionMap` / `ChannelInfo` / `NodeInfo` / `MappingInfo`). |
 | `Sources/ProbeKit/FourCC.swift` | `FourCharCode` ↔ `String` helpers (shared by the scanner and the extensions' AudioComponent identity). |
 | `Sources/ProbeKit/RealtimeRing.swift` | Lock-free single-producer/single-consumer `Float` ring buffer (swift-atomics) for the audio tap's render thread. |
@@ -433,10 +433,18 @@ One document per audio unit. Keys are pinned to the Go structs consumed by
   `.convertToString` as a defensive backstop.
 - `unitName` / `valueStrings` are optional: the Go side decodes JSON `null` into
   the empty string / a nil slice respectively.
-- The staged filename is `<id>.json`, where the id is the sanitized component
-  subtype (falling back to the name). `AudioUnitDetails.fileID` / `sanitizeID`
-  mirror the Go `device.ProbeID` / `sanitizeName` so the Save-to-Files path
-  matches the receiver's naming exactly.
+- The staged filename is `<id>.json`. The id is the whole component,
+  `<type>-<subtype>-<manufacturer>`, with each code written so that distinct
+  components never share an id, even on a case-insensitive filesystem: `a-z` and
+  `0-9` stay as they are, `A-Z` becomes `_` plus the lowercase letter, any other
+  byte becomes `__` plus two hex digits (`aumu`/`Ab12`/`XyZw` →
+  `aumu-_ab12-_xy_zw`). Units that share a subtype (another type or
+  manufacturer, or the same subtype in other letter case) therefore stage
+  separate files. A record without a component type keeps the older id, the
+  sanitized subtype or name. `AudioUnitDetails.fileID` / `componentID` mirror
+  the Go `device.ProbeID` / `device.ComponentID` (github.com/teemow/midi-device),
+  so the Save-to-Files path matches the receiver's naming exactly;
+  `Tests/ProbeKitTests` pins the same vectors as the Go tests.
 
 ### Scan report (`ScanReport`)
 
@@ -486,9 +494,10 @@ is gitignored.
   in-repo `Package.swift` + `xtool.yml` (which point at the same `Sources/`). The
   same `inter-app-audio` entitlement is declared via `xtool.yml`'s
   `entitlementsPath`. See [building-on-linux.md](building-on-linux.md).
-- **CI:** `.github/workflows/ci.yaml` runs a build-only check
-  (`xcodebuild ... CODE_SIGNING_ALLOWED=NO`) on a GitHub-hosted `macos-latest`
-  runner — no personal machine in the loop.
+- **CI:** `.github/workflows/ci.yaml` builds for iOS
+  (`xcodebuild ... CODE_SIGNING_ALLOWED=NO`) and runs the `ProbeKitTests` unit
+  tests on an iOS simulator, on a GitHub-hosted `macos-latest` runner — no
+  personal machine in the loop.
 
 ## Non-goals / future
 

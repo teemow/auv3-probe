@@ -229,12 +229,53 @@ public struct AudioUnitDetails: Codable, Equatable {
         return v
     }
 
-    /// The sanitized id the daemon uses to name the staged `<id>.json` file
-    /// (component subtype, falling back to the name). Mirrors the Go device
-    /// ProbeID so the Save-to-Files fallback produces the same filename.
+    /// The id the daemon uses to name the staged `<id>.json` file. Mirrors the
+    /// Go `device.ProbeID` (github.com/teemow/midi-device) so the
+    /// Save-to-Files fallback and the scan report use the daemon's filename;
+    /// the two must change together.
     public var fileID: String {
-        let base = component.subtype.isEmpty ? name : component.subtype
-        return AudioUnitDetails.sanitizeID(base)
+        AudioUnitDetails.probeID(component: component, name: name)
+    }
+
+    /// The staging id of an audio unit: `componentID` when the component has a
+    /// type, else the earlier sanitized subtype or name (hand-made dumps).
+    /// Mirrors the Go `device.ProbeID`.
+    public static func probeID(component c: AudioUnitComponent, name: String) -> String {
+        if !c.type.isEmpty {
+            return componentID(c)
+        }
+        return sanitizeID(c.subtype.isEmpty ? name : c.subtype)
+    }
+
+    /// Renders a component's type, subtype and manufacturer as one lowercase
+    /// id, `<type>-<subtype>-<manufacturer>`, distinct for every distinct
+    /// component even where letter case is ignored. Units that share a subtype
+    /// (another type or manufacturer, or the same subtype in other letter case)
+    /// therefore never overwrite each other's staged dump. Each code is written
+    /// byte by byte: `a-z`/`0-9` as is, `A-Z` as `_` and the lowercase letter,
+    /// any other byte as `__` and two lowercase hex digits. Mirrors the Go
+    /// `device.ComponentID`.
+    public static func componentID(_ c: AudioUnitComponent) -> String {
+        [c.type, c.subtype, c.manufacturer].map(encodeCode).joined(separator: "-")
+    }
+
+    private static func encodeCode(_ code: String) -> String {
+        let hex = Array("0123456789abcdef")
+        var out = ""
+        for byte in code.utf8 {
+            switch byte {
+            case UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "0")...UInt8(ascii: "9"):
+                out.append(Character(UnicodeScalar(byte)))
+            case UInt8(ascii: "A")...UInt8(ascii: "Z"):
+                out.append("_")
+                out.append(Character(UnicodeScalar(byte + 0x20)))
+            default:
+                out.append("__")
+                out.append(hex[Int(byte >> 4)])
+                out.append(hex[Int(byte & 0x0f)])
+            }
+        }
+        return out
     }
 
     /// Lowercases and reduces a label to a filename/id-safe token: runs of
