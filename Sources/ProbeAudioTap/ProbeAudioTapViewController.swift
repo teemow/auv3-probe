@@ -21,6 +21,9 @@ public final class ProbeAudioTapViewController: AUViewController, AUAudioUnitFac
     public func createAudioUnit(with componentDescription: AudioComponentDescription) throws -> AUAudioUnit {
         let unit = try ProbeAudioTapAU(componentDescription: componentDescription)
         tap = unit
+        // The view may already be loaded, so the UI can go up here, before the
+        // host restores the unit's state; TapViewModel follows the unit for
+        // that (see ProbeMidiBrainViewController).
         DispatchQueue.main.async { [weak self] in self?.installUIIfReady() }
         return unit
     }

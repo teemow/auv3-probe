@@ -10,7 +10,18 @@ import ProbeKit
 @MainActor
 final class TapViewModel: ObservableObject {
     private let audioUnit: ProbeAudioTapAU
-    @Published var config: TapConfig
+    /// The config on screen. A change goes to the audio unit at once, so this
+    /// copy differs from `audioUnit.config` only after the host restored a
+    /// state, which `poll` then adopts.
+    @Published var config: TapConfig {
+        didSet {
+            guard !adoptingRestoredConfig, config != oldValue else { return }
+            audioUnit.updateConfig(config)
+        }
+    }
+    /// Set while `poll` takes over the audio unit's config, so that is not
+    /// written back as if it were a change made here.
+    private var adoptingRestoredConfig = false
     @Published var peak: Float = 0
     @Published var rms: Float = 0
     private var timer: Timer?
@@ -20,17 +31,28 @@ final class TapViewModel: ObservableObject {
         self.config = audioUnit.config
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            Task { @MainActor in
-                let levels = self.audioUnit.levels
-                self.peak = levels.peak
-                self.rms = levels.rms
-            }
+            Task { @MainActor in self.poll() }
         }
     }
 
     deinit { timer?.invalidate() }
 
-    func commit() { audioUnit.updateConfig(config) }
+    /// Mirror the audio unit's state (timer-driven; internal for the tests).
+    func poll() {
+        let levels = audioUnit.levels
+        peak = levels.peak
+        rms = levels.rms
+        // The host restores the config whenever it likes. AUM does it after
+        // creating the unit, and iOS may have built this view by then: without
+        // this, the button keeps showing the streaming state the unit started
+        // with.
+        let restored = audioUnit.config
+        if restored != config {
+            adoptingRestoredConfig = true
+            config = restored
+            adoptingRestoredConfig = false
+        }
+    }
 }
 
 public struct ProbeAudioTapView: View {
@@ -113,8 +135,8 @@ public struct ProbeAudioTapView: View {
         VStack(alignment: .leading, spacing: 6) {
             SectionHeader("stream")
             Button {
+                // Reaches the audio unit through `config`'s didSet.
                 model.config.streaming.toggle()
-                model.commit()
             } label: {
                 Text(model.config.streaming ? "stop streaming" : "start streaming")
             }

@@ -424,8 +424,8 @@ via AUv3 `fullState`:
   copy for good: it adopts the unit's program whenever that differs, and writes
   every edit to the unit at once. A state without a program leaves the current
   one in place, which for a new unit is the demo.
-- ProbeAudioTap stores its `TapConfig` (streaming flag + decimation) under
-  `probeAudioTapConfig`.
+- ProbeAudioTap stores its `TapConfig` (the streaming flag) under
+  `probeAudioTapConfig`. Its window follows the unit in the same way.
 
 So the daemon can author the tap's streaming flag into a `.aumproj` (AUM's
 per-node `AuStateDoc`) and both extensions come up connected on load — the
