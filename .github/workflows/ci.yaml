@@ -32,3 +32,6 @@ jobs:
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
             build
+
+      - name: Unit tests (iOS simulator)
+        run: make test

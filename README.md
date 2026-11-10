@@ -137,6 +137,12 @@ A build-only sanity check (no signing) is available via:
 make build
 ```
 
+ProbeKit's unit tests (`Tests/ProbeKitTests`) run on an iOS simulator:
+
+```bash
+make test
+```
+
 ## Building (on Linux, no Mac)
 
 You can also build, sign, and install straight from Linux with a free Apple ID
@@ -236,8 +242,9 @@ The ferry is purely additive — listing and inspecting always work offline.
 
 `.github/workflows/ci.yaml` runs a build-only check on a GitHub-hosted
 `macos-latest` runner (free for public repos): it installs XcodeGen, generates
-the project, and runs `xcodebuild ... build CODE_SIGNING_ALLOWED=NO`. It does
-not depend on any personal machine. If you later want CI to sign and install to
+the project, runs `xcodebuild ... build CODE_SIGNING_ALLOWED=NO`, then
+`make test` (ProbeKit's unit tests on an iOS simulator). It does not depend on
+any personal machine. If you later want CI to sign and install to
 a device, add a self-hosted macOS runner.
 
 ## Public-repo rule

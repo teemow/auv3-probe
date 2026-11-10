@@ -9,7 +9,11 @@ PROJECT := AUv3Probe.xcodeproj
 SWIFT_ENV ?= $(HOME)/swift-toolchain/env.sh
 load_env = if [ -f "$(SWIFT_ENV)" ]; then . "$(SWIFT_ENV)"; fi;
 
-.PHONY: help generate build clean deploy xtool-build devices
+# Simulator for `make test`: the first available iPhone. Override with e.g.
+#   make test TEST_DESTINATION='platform=iOS Simulator,name=iPhone 16'
+TEST_DESTINATION ?= id=$(shell xcrun simctl list devices available 2>/dev/null | grep -E '^ +iPhone' | grep -Eo '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' | head -1)
+
+.PHONY: help generate build test clean deploy xtool-build devices
 
 ## help: list available targets
 help:
@@ -18,6 +22,7 @@ help:
 	@echo "  macOS / Xcode (canonical, see README):"
 	@echo "    generate     regenerate AUv3Probe.xcodeproj from project.yml (needs xcodegen)"
 	@echo "    build        build-only sanity check for iOS, no code signing (needs Xcode)"
+	@echo "    test         run ProbeKit's unit tests on an iOS simulator (needs Xcode)"
 	@echo
 	@echo "  Linux, no Mac (xtool, see docs/building-on-linux.md):"
 	@echo "    xtool-build  cross-compile the app with xtool (surfaces source errors, no signing)"
@@ -43,6 +48,16 @@ build: generate
 		-configuration Debug \
 		CODE_SIGNING_ALLOWED=NO \
 		build
+
+## test: run ProbeKit's unit tests (ProbeKitTests) on an iOS simulator
+test: generate
+	xcodebuild \
+		-project $(PROJECT) \
+		-scheme ProbeKit \
+		-destination '$(TEST_DESTINATION)' \
+		-configuration Debug \
+		CODE_SIGNING_ALLOWED=NO \
+		test
 
 # ---------------------------------------------------------------------------
 # Linux path (no Mac) — builds/signs/installs straight from Linux with xtool,
