@@ -106,8 +106,9 @@ public struct DaemonClient {
 
     /// The WebSocket URL for a given path on the same host (e.g. `audio-stream`),
     /// translating `http`/`https` to `ws`/`wss`. Used by ProbeAudioTap to stream
-    /// to the same receiver the app's host bar points at.
-    public func webSocketURL(path: String) -> URL? {
+    /// to the same receiver the app's host bar points at. `query` is appended
+    /// as `?name=value&…` (a named tap dials `audio-stream?name=<its name>`).
+    public func webSocketURL(path: String, query: [URLQueryItem] = []) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
             return nil
         }
@@ -116,8 +117,24 @@ public struct DaemonClient {
         default: components.scheme = "ws"
         }
         components.path = "/" + path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !query.isEmpty {
+            components.percentEncodedQuery = query
+                .map { Self.queryEscaped($0.name) + "=" + Self.queryEscaped($0.value ?? "") }
+                .joined(separator: "&")
+        }
         return components.url
     }
+
+    /// Percent-encode a query name or value down to the unreserved characters
+    /// (RFC 3986). `URLComponents.queryItems` would leave `+` and `;` as they
+    /// are, and the daemon's query parser reads `+` as a space and drops a
+    /// pair that holds a `;`.
+    static func queryEscaped(_ text: String) -> String {
+        text.addingPercentEncoding(withAllowedCharacters: queryUnreserved) ?? ""
+    }
+
+    private static let queryUnreserved = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
     // MARK: - Shared
 

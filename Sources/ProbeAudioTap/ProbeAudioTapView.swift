@@ -3,9 +3,9 @@ import Combine
 import ProbeKit
 
 // The control surface for ProbeAudioTap: a start/stop toggle, a live level
-// meter (peak/RMS), and connection status — in the signalwave language. Audio is
-// streamed full-rate and full-fidelity (interleaved, no decimation), so there is
-// no quality knob to tune.
+// meter (peak/RMS), the name the tap streams under, and connection status — in
+// the signalwave language. Audio is streamed full-rate and full-fidelity
+// (interleaved, no decimation), so there is no quality knob to tune.
 
 @MainActor
 final class TapViewModel: ObservableObject {
@@ -25,6 +25,11 @@ final class TapViewModel: ObservableObject {
     @Published var peak: Float = 0
     @Published var rms: Float = 0
     private var timer: Timer?
+
+    /// The name the tap streams under, as the window shows it; nil for a tap
+    /// without one. It comes with the session (the daemon writes it), so it
+    /// is shown, not edited.
+    var name: String? { config.streamName }
 
     init(audioUnit: ProbeAudioTapAU) {
         self.audioUnit = audioUnit
@@ -134,6 +139,18 @@ public struct ProbeAudioTapView: View {
     private var streamPanel: some View {
         VStack(alignment: .leading, spacing: 6) {
             SectionHeader("stream")
+            if let name = model.name {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("name")
+                        .font(Signalwave.mono(.caption2))
+                        .foregroundStyle(Signalwave.dim)
+                    Text(name)
+                        .font(Signalwave.mono(.caption))
+                        .foregroundStyle(Signalwave.fg)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
             Button {
                 // Reaches the audio unit through `config`'s didSet.
                 model.config.streaming.toggle()

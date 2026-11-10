@@ -7,8 +7,11 @@ import ProbeKit
 // drain the ring, ship interleaved PCM, and emit periodic feature messages.
 //
 // Wire contract (see docs/auv3-extension.md, "Audio-stream protocol"):
+//   - a tap with a name dials `audio-stream?name=<its name>`, one without
+//       dials `audio-stream`.
 //   - on connect, one TEXT message:  {"type":"format","encoding":"f32le",
-//       "channels":<host ch>,"sampleRate":<host Hz>,"source":"ProbeAudioTap"}
+//       "channels":<host ch>,"sampleRate":<host Hz>,"source":<the tap's name,
+//       or "ProbeAudioTap" when it has none>}
 //   - audio: BINARY messages of little-endian Float32 PCM, interleaved across
 //       channels at the host sample rate (full fidelity, no downmix/decimation).
 //   - ~10 Hz TEXT feature messages: {"type":"features","rms":<f>,"peak":<f>}.
@@ -22,6 +25,8 @@ final class TapStreamer: @unchecked Sendable {
 
     // All of the following are touched only on `socket.queue` (via the socket
     // hooks and the drain timer, which is scheduled on that same queue).
+    /// The name the present connection was dialled under, nil for none.
+    private var name: String?
     private var task: URLSessionWebSocketTask?
     private var timer: DispatchSourceTimer?
     private var drain: UnsafeMutableBufferPointer<Float>
@@ -62,9 +67,16 @@ final class TapStreamer: @unchecked Sendable {
         drain.deallocate()
     }
 
-    /// Enable streaming and keep it connected (auto-reconnecting). The host comes
-    /// from Bonjour discovery (DaemonDiscovery.shared.currentHost).
-    func start() { socket.start() }
+    /// Enable streaming under `name` (nil: without one) and keep it connected
+    /// (auto-reconnecting). The host comes from Bonjour discovery
+    /// (DaemonDiscovery.shared.currentHost). Starting a tap that already
+    /// streams dials again, so a changed name reaches the daemon.
+    func start(name: String?) {
+        // Ahead of the socket's own start on the same queue, so the format
+        // message of the connection it opens carries this name.
+        socket.queue.async { [weak self] in self?.name = name }
+        socket.start(query: Self.query(name: name))
+    }
 
     func stop() { socket.stop() }
 
@@ -78,14 +90,29 @@ final class TapStreamer: @unchecked Sendable {
         t.resume()
     }
 
-    private func sendFormat(on task: URLSessionWebSocketTask) {
-        let header: [String: Any] = [
+    /// What a tap without a name calls itself in the format message.
+    static let unnamedSource = "ProbeAudioTap"
+
+    /// The query a tap dials the daemon with: its name, when it has one. The
+    /// daemon keeps the streams of several taps apart by it.
+    static func query(name: String?) -> [URLQueryItem] {
+        guard let name else { return [] }
+        return [URLQueryItem(name: "name", value: name)]
+    }
+
+    /// The format message that opens a connection.
+    static func formatMessage(channels: Int, sampleRate: Double, name: String?) -> [String: Any] {
+        [
             "type": "format",
             "encoding": "f32le",
             "channels": channels,
             "sampleRate": sampleRate,
-            "source": "ProbeAudioTap",
+            "source": name ?? unnamedSource,
         ]
+    }
+
+    private func sendFormat(on task: URLSessionWebSocketTask) {
+        let header = Self.formatMessage(channels: channels, sampleRate: sampleRate, name: name)
         if let data = try? JSONSerialization.data(withJSONObject: header),
            let json = String(data: data, encoding: .utf8) {
             task.send(.string(json)) { _ in }

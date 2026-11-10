@@ -137,6 +137,26 @@ final class DaemonHostFormattingTests: XCTestCase {
                        "ws://[fe80::1%25en0]:7800/audio-stream")
     }
 
+    /// A query reaches the daemon as it was meant: its parser reads a `+` as a
+    /// space and drops a pair that holds a `;`, so both are escaped, like
+    /// everything that is not an unreserved character.
+    func testWebSocketURLEscapesItsQuery() throws {
+        let client = try XCTUnwrap(DaemonClient(host: "192.0.2.10:7800"))
+        XCTAssertEqual(client.webSocketURL(path: "audio-stream", query: [])?.absoluteString,
+                       "ws://192.0.2.10:7800/audio-stream")
+        XCTAssertEqual(
+            client.webSocketURL(path: "audio-stream",
+                                query: [URLQueryItem(name: "name", value: "Songs/Night Drive/master")])?.absoluteString,
+            "ws://192.0.2.10:7800/audio-stream?name=Songs%2FNight%20Drive%2Fmaster")
+        XCTAssertEqual(DaemonClient.queryEscaped("a+b;c&d=e?f#g%h"), "a%2Bb%3Bc%26d%3De%3Ff%23g%25h")
+        XCTAssertEqual(DaemonClient.queryEscaped("Über-Bass_1.2~"), "%C3%9Cber-Bass_1.2~")
+
+        let linkLocal = try XCTUnwrap(DaemonClient(host: "[fe80::1%en0]:7800"))
+        XCTAssertEqual(
+            linkLocal.webSocketURL(path: "audio-stream", query: [URLQueryItem(name: "name", value: "a/b")])?.absoluteString,
+            "ws://[fe80::1%25en0]:7800/audio-stream?name=a%2Fb")
+    }
+
     func testNormalizeManual() {
         XCTAssertNil(DaemonDiscovery.normalizeManual(nil))
         XCTAssertNil(DaemonDiscovery.normalizeManual("  "))
