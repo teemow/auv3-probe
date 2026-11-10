@@ -62,7 +62,10 @@ final class BrainProgramRestoreTests: XCTestCase {
         let saved = try makeBrain()
         saved.updateProgram(emptyProgram)
         let state = try XCTUnwrap(saved.fullState)
-        XCTAssertEqual(state[BrainProgram.fullStateKey] as? Data, emptyProgram.fullStateData)
+        // The program travels as JSON bytes. Their key order varies from one
+        // encoding to the next, so compare what they decode to.
+        XCTAssertTrue(state[BrainProgram.fullStateKey] is Data)
+        XCTAssertEqual(BrainProgram.restored(fromFullState: state), emptyProgram)
 
         let loaded = try makeBrain()
         loaded.fullState = state
