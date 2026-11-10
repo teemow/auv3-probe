@@ -234,10 +234,11 @@ The ferry is purely additive — listing and inspecting always work offline.
 
 ## CI
 
-`.github/workflows/ci.yaml` runs a build-only check on a GitHub-hosted
-`macos-latest` runner (free for public repos): it installs XcodeGen, generates
-the project, and runs `xcodebuild ... build CODE_SIGNING_ALLOWED=NO`. It does
-not depend on any personal machine. If you later want CI to sign and install to
+`.github/workflows/ci.yaml` runs on a GitHub-hosted `macos-latest` runner
+(free for public repos): it installs XcodeGen, generates the project, runs
+`xcodebuild ... build CODE_SIGNING_ALLOWED=NO`, then runs the `ProbeKitTests`
+unit tests (`Tests/ProbeKitTests`) on an iOS simulator with `xcodebuild test`.
+It does not depend on any personal machine. If you later want CI to sign and install to
 a device, add a self-hosted macOS runner.
 
 ## Public-repo rule
