@@ -75,10 +75,11 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_USER_SCRIPT_SANDBOXING: YES
     # The explicit scheme keeps `-scheme AUv3Probe` for the build and runs
-    # ProbeKitTests on `xcodebuild test`.
+    # the unit tests on `xcodebuild test`.
     scheme:
       testTargets:
         - ProbeKitTests
+        - ProbeMidiBrainTests
 
   # ProbeMidiBrain — `aumi` MIDI-processor app extension. XcodeGen generates a
   # complete Info.plist from the `info.properties` below (the NSExtension /
@@ -172,4 +173,22 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeKitTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  # Unit tests for the ProbeMidiBrain extension: the audio unit and its view
+  # model, driven the way a host drives them (create, restore `fullState`). An
+  # app extension cannot be imported, so its sources are compiled into the test
+  # bundle; like the extension, it gets Atomics through ProbeKit.
+  ProbeMidiBrainTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Sources/ProbeMidiBrain
+      - Tests/ProbeMidiBrainTests
+    dependencies:
+      - target: ProbeKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeMidiBrainTests
         GENERATE_INFOPLIST_FILE: YES

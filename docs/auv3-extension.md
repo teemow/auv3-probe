@@ -419,6 +419,11 @@ via AUv3 `fullState`:
 - ProbeMidiBrain stores only the `BrainProgram` (song sections + footswitch map
   + output encoding) under `probeMidiBrainProgram`. Its control channel is
   always-on (no flag) — it auto-connects to the discovered daemon.
+  AUM restores the program after it created the unit, and iOS may have built
+  the plugin's view by then. The view model therefore does not keep its own
+  copy for good: it adopts the unit's program whenever that differs, and writes
+  every edit to the unit at once. A state without a program leaves the current
+  one in place, which for a new unit is the demo.
 - ProbeAudioTap stores its `TapConfig` (streaming flag + decimation) under
   `probeAudioTapConfig`.
 

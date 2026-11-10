@@ -22,8 +22,18 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
     private var inputBusArray: AUAudioUnitBusArray!
     private var outputBusArray: AUAudioUnitBusArray!
 
-    /// The authored program. Setting it republishes to the realtime engine.
-    public private(set) var program: BrainProgram = .demo
+    // The authored program. The plugin UI edits it on the main thread and the
+    // host restores it through `fullState` on a thread of its own, at any time
+    // (AUM does it right after creating the unit, when the UI may already be
+    // up) — hence the lock. The render thread never reads it: it only sees the
+    // copy `updateProgram` publishes to the engine.
+    private let programState = OSAllocatedUnfairLock(initialState: BrainProgram.demo)
+
+    /// The authored program, as last edited in the UI or restored by the host.
+    /// The UI polls it so an open window follows a restore.
+    public var program: BrainProgram {
+        programState.withLock { $0 }
+    }
 
     // The control plane (the LAN-command controller) is touched from the
     // render-resource thread (allocateRenderResources / deallocate), so it is
@@ -41,9 +51,6 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         // alongside the BrainController.
         var diagnostics: DiagnosticsChannel?
     }
-
-    /// Key under which the program is stored inside `fullState`.
-    private static let programStateKey = "probeMidiBrainProgram"
 
     /// Key under which the cached control-surface manifest is stored inside
     /// `fullState`, so AUM persists it with the session and the surface renders
@@ -100,10 +107,14 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
 
     // MARK: - Program (authoring API for the view model)
 
-    /// Replace the program and republish it to the realtime engine.
+    /// Replace the program and republish it to the realtime engine. One lock
+    /// covers both, so the engine always runs the program `program` returns
+    /// even when a UI edit and a host restore cross.
     public func updateProgram(_ newProgram: BrainProgram) {
-        program = newProgram
-        engine.setProgram(newProgram)
+        programState.withLock { [engine] current in
+            current = newProgram
+            engine.setProgram(newProgram)
+        }
     }
 
     // MARK: - Control surface (session-derived manifest + local emission)
@@ -254,8 +265,8 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
     public override var fullState: [String: Any]? {
         get {
             var state = super.fullState ?? [:]
-            if let data = try? JSONEncoder().encode(program) {
-                state[Self.programStateKey] = data
+            if let data = program.fullStateData {
+                state[BrainProgram.fullStateKey] = data
             }
             if let surface = surfaceBox.value,
                let data = try? JSONEncoder().encode(surface) {
@@ -265,9 +276,10 @@ public final class ProbeMidiBrainAU: AUAudioUnit {
         }
         set {
             super.fullState = newValue
-            if let data = newValue?[Self.programStateKey] as? Data,
-               let decoded = try? JSONDecoder().decode(BrainProgram.self, from: data) {
-                updateProgram(decoded)
+            // A state without a program (or with one that does not decode)
+            // leaves the current program in place.
+            if let restored = BrainProgram.restored(fromFullState: newValue) {
+                updateProgram(restored)
             }
             if let state = newValue {
                 // A restored state without a surface key (or an undecodable one)

@@ -28,7 +28,10 @@ public final class ProbeMidiBrainViewController: AUViewController, AUAudioUnitFa
     public func createAudioUnit(with componentDescription: AudioComponentDescription) throws -> AUAudioUnit {
         let unit = try ProbeMidiBrainAU(componentDescription: componentDescription)
         brain = unit
-        // The view may already be loaded (host presented UI first); install now.
+        // The view may already be loaded: iOS can build it with the extension,
+        // before the host shows the window. Then the UI goes up here, before
+        // the host restores the unit's state; BrainViewModel follows the unit
+        // for that.
         DispatchQueue.main.async { [weak self] in self?.installUIIfReady() }
         return unit
     }

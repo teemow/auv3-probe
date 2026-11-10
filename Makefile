@@ -22,7 +22,7 @@ help:
 	@echo "  macOS / Xcode (canonical, see README):"
 	@echo "    generate     regenerate AUv3Probe.xcodeproj from project.yml (needs xcodegen)"
 	@echo "    build        build-only sanity check for iOS, no code signing (needs Xcode)"
-	@echo "    test         run ProbeKit's unit tests on an iOS simulator (needs Xcode)"
+	@echo "    test         run the unit tests on an iOS simulator (needs Xcode)"
 	@echo
 	@echo "  Linux, no Mac (xtool, see docs/building-on-linux.md):"
 	@echo "    xtool-build  cross-compile the app with xtool (surfaces source errors, no signing)"
@@ -49,7 +49,7 @@ build: generate
 		CODE_SIGNING_ALLOWED=NO \
 		build
 
-## test: run ProbeKit's unit tests (ProbeKitTests) on an iOS simulator
+## test: run the unit tests (the AUv3Probe scheme's test bundles) on an iOS simulator
 test: generate
 	xcodebuild \
 		-project $(PROJECT) \
