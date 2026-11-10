@@ -53,7 +53,7 @@ build: generate
 test: generate
 	xcodebuild \
 		-project $(PROJECT) \
-		-scheme ProbeKit \
+		-scheme $(SCHEME) \
 		-destination '$(TEST_DESTINATION)' \
 		-configuration Debug \
 		CODE_SIGNING_ALLOWED=NO \

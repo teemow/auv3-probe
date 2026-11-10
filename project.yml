@@ -49,25 +49,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeKit
         GENERATE_INFOPLIST_FILE: YES
         APPLICATION_EXTENSION_API_ONLY: YES
-    # `xcodebuild test -scheme ProbeKit` runs ProbeKitTests (see `make test`).
-    scheme:
-      testTargets:
-        - ProbeKitTests
-
-  # Unit tests for ProbeKit's pure logic (Bonjour address choice, host
-  # formatting). Hostless, run on an iOS simulator by `make test` and CI.
-  ProbeKitTests:
-    type: bundle.unit-test
-    platform: iOS
-    deploymentTarget: "16.0"
-    sources:
-      - Tests/ProbeKitTests
-    dependencies:
-      - target: ProbeKit
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeKitTests
-        GENERATE_INFOPLIST_FILE: YES
 
   # The container app (jobs 1 + 2 + authoring). Embeds ProbeKit + both appex.
   AUv3Probe:
@@ -93,9 +74,11 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Resources/AUv3Probe.entitlements
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_USER_SCRIPT_SANDBOXING: YES
-    # Generated explicitly so `make build` / CI's `-scheme AUv3Probe` don't
-    # depend on Xcode autocreating schemes next to ProbeKit's shared one.
-    scheme: {}
+    # The explicit scheme keeps `-scheme AUv3Probe` for the build and runs
+    # ProbeKitTests on `xcodebuild test`.
+    scheme:
+      testTargets:
+        - ProbeKitTests
 
   # ProbeMidiBrain — `aumi` MIDI-processor app extension. XcodeGen generates a
   # complete Info.plist from the `info.properties` below (the NSExtension /
@@ -174,3 +157,19 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.AudioTap
         CODE_SIGN_ENTITLEMENTS: Resources/AUv3Probe.entitlements
+
+  # Unit tests for ProbeKit's pure logic (the staging id the daemon shares,
+  # Bonjour address choice, host formatting), run on an iOS simulator by CI
+  # and `make test`. No host app: the tests only need ProbeKit.
+  ProbeKitTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Tests/ProbeKitTests
+    dependencies:
+      - target: ProbeKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeKitTests
+        GENERATE_INFOPLIST_FILE: YES

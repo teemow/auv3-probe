@@ -126,10 +126,7 @@ final class AudioUnitsModel: ObservableObject {
                 statuses[unit.id] = .failed(error.localizedDescription)
                 results.append(ScanResult(
                     id: unit.fileID, name: unit.name,
-                    component: AudioUnitComponent(
-                        type: unit.typeCode, subtype: "", manufacturer: "",
-                        manufacturerName: unit.manufacturer.isEmpty ? nil : unit.manufacturer,
-                        version: unit.version.isEmpty ? nil : unit.version),
+                    component: unit.component,
                     status: "failed", error: error.localizedDescription,
                     params: 0, writable: 0, sanitized: nil))
             }

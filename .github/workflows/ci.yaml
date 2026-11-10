@@ -33,5 +33,18 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Unit tests (iOS simulator)
-        run: make test
+      # ProbeKit uses iOS-only APIs, so its unit tests run on an iOS simulator
+      # (not `swift test` on the macOS host). Picks the first available iPhone
+      # simulator so the step survives the runner's Xcode updates.
+      - name: Test (iOS simulator)
+        run: |
+          udid=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.name | startswith("iPhone"))][0].udid')
+          echo "simulator: $udid"
+          xcodebuild \
+            -project AUv3Probe.xcodeproj \
+            -scheme AUv3Probe \
+            -destination "id=$udid" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            test
