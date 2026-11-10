@@ -80,6 +80,7 @@ targets:
       testTargets:
         - ProbeKitTests
         - ProbeMidiBrainTests
+        - ProbeAudioTapTests
 
   # ProbeMidiBrain — `aumi` MIDI-processor app extension. XcodeGen generates a
   # complete Info.plist from the `info.properties` below (the NSExtension /
@@ -191,4 +192,20 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeMidiBrainTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  # The same for the ProbeAudioTap extension: its audio unit and view model,
+  # built from the extension's sources.
+  ProbeAudioTapTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Sources/ProbeAudioTap
+      - Tests/ProbeAudioTapTests
+    dependencies:
+      - target: ProbeKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.ProbeAudioTapTests
         GENERATE_INFOPLIST_FILE: YES

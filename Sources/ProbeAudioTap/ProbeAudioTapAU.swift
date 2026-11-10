@@ -37,8 +37,6 @@ public final class ProbeAudioTapAU: AUAudioUnit {
     private var inputBusArray: AUAudioUnitBusArray!
     private var outputBusArray: AUAudioUnitBusArray!
 
-    private static let configStateKey = "probeAudioTapConfig"
-
     public override init(componentDescription: AudioComponentDescription,
                          options: AudioComponentInstantiationOptions = []) throws {
         try super.init(componentDescription: componentDescription, options: options)
@@ -55,7 +53,8 @@ public final class ProbeAudioTapAU: AUAudioUnit {
     public override var inputBusses: AUAudioUnitBusArray { inputBusArray }
     public override var outputBusses: AUAudioUnitBusArray { outputBusArray }
 
-    /// Current config (snapshot).
+    /// Current config (snapshot), as last set in the UI or restored by the
+    /// host. The UI polls it so an open window follows a restore.
     public var config: TapConfig { control.withLock { $0.config } }
 
     // MARK: - Config (UI API)
@@ -137,16 +136,17 @@ public final class ProbeAudioTapAU: AUAudioUnit {
             // Persist the tap's config (streaming flag + decimation) inside the
             // AUM session, per node. The daemon host is not stored here — it is
             // found via Bonjour discovery (DaemonDiscovery).
-            if let data = try? JSONEncoder().encode(config) {
-                state[Self.configStateKey] = data
+            if let data = config.fullStateData {
+                state[TapConfig.fullStateKey] = data
             }
             return state
         }
         set {
             super.fullState = newValue
-            if let data = newValue?[Self.configStateKey] as? Data,
-               let decoded = try? JSONDecoder().decode(TapConfig.self, from: data) {
-                updateConfig(decoded)
+            // A state without a config (or with one that does not decode)
+            // leaves the current config in place.
+            if let restored = TapConfig.restored(fromFullState: newValue) {
+                updateConfig(restored)
             }
         }
     }
@@ -164,5 +164,24 @@ public struct TapConfig: Codable, Equatable {
 
     public init(streaming: Bool = true) {
         self.streaming = streaming
+    }
+
+    // MARK: - fullState (how a host stores the config in its session)
+
+    /// Key under which the config sits inside the AU's `fullState`: JSON bytes,
+    /// which AUM keeps in the node's `AuStateDoc`. The daemon authors the same
+    /// key into the sessions it writes, so keep the two in sync.
+    public static let fullStateKey = "probeAudioTapConfig"
+
+    /// The config a host handed back in `fullState`, or nil when the state
+    /// carries none or one that does not decode.
+    public static func restored(fromFullState state: [String: Any]?) -> TapConfig? {
+        guard let data = state?[fullStateKey] as? Data else { return nil }
+        return try? JSONDecoder().decode(TapConfig.self, from: data)
+    }
+
+    /// The config as stored under `fullStateKey`.
+    public var fullStateData: Data? {
+        try? JSONEncoder().encode(self)
     }
 }
