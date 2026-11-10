@@ -137,7 +137,8 @@ A build-only sanity check (no signing) is available via:
 make build
 ```
 
-ProbeKit's unit tests (`Tests/ProbeKitTests`) run on an iOS simulator:
+The unit tests (`Tests/ProbeKitTests`, `Tests/ProbeMidiBrainTests`) run on an iOS
+simulator:
 
 ```bash
 make test
