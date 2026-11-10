@@ -10,6 +10,13 @@
 #   tap-at <x> <y> [app]  tap a point (in points, not screenshot pixels)
 #   hold <x> <y> [app]    long-press a point for 1.2 s
 #   swipe <x1> <y1> <x2> <y2> [app]  drag from one point to another (scroll)
+#   dtap <x> <y> [app]    double-tap a point
+#   drag <x1> <y1> <x2> <y2> [<x3> <y3> ...] [app]  press, move through the
+#                         points, hold, release (reorder nodes or channels, move windows)
+#   confirm <x> <y> [app] tap a point twice, 0.5 s apart (two-step buttons such as CLEAR)
+#   type <text> [app]     clear the first text field on screen and type text into it
+#   enter [app]           press Return on the on-screen keyboard
+#   fields [app]          list text fields and their values
 #   size [app]            window size in points (tells the orientation)
 #   tree [app]            print the accessibility tree (labels + positions)
 #   status                tunnel / disk image / WebDriverAgent state
@@ -35,7 +42,7 @@ APPLE_ROOT_PEM="$GOIOS_HOME/apple-root.pem"
 die() { echo "ipad: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH (see docs/ipad-automation.md)"; }
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Run go-ios quietly: it logs JSON to stderr, which is shown only on failure.
 goios() {
@@ -184,8 +191,25 @@ def call(method, path, body=None):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(base + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except TimeoutError:
+        sys.exit("ipad: WebDriverAgent did not answer within 60 s. A plugin window with a "
+                 "remote view open can hang it: restart `ipad wda`, then close the window "
+                 "with tap-at (see docs/ipad-automation.md)")
+
+def touch(steps):
+    call("POST", f"/session/{sid}/actions", {"actions": [{
+        "type": "pointer", "id": "finger", "parameters": {"pointerType": "touch"},
+        "actions": steps}]})
+
+def text_fields():
+    return call("POST", f"/session/{sid}/elements",
+                {"using": "class name", "value": "XCUIElementTypeTextField"})["value"]
+
+def eid_of(el):
+    return el.get("ELEMENT") or next(iter(el.values()))
 
 def point(xs):
     try:
@@ -226,13 +250,58 @@ try:
         x1, y1, x2, y2 = point(args[:4])
         # A W3C touch action: down, move over 300 ms, up. WDA's own drag endpoint
         # presses first, which AUM reads as a long-press.
-        call("POST", f"/session/{sid}/actions", {"actions": [{
-            "type": "pointer", "id": "finger", "parameters": {"pointerType": "touch"},
-            "actions": [{"type": "pointerMove", "duration": 0, "x": x1, "y": y1},
-                        {"type": "pointerDown", "button": 0},
-                        {"type": "pointerMove", "duration": 300, "x": x2, "y": y2},
-                        {"type": "pointerUp", "button": 0}]}]})
+        touch([{"type": "pointerMove", "duration": 0, "x": x1, "y": y1},
+               {"type": "pointerDown", "button": 0},
+               {"type": "pointerMove", "duration": 300, "x": x2, "y": y2},
+               {"type": "pointerUp", "button": 0}])
         print(f"swiped {x1:g},{y1:g} -> {x2:g},{y2:g}")
+    elif action == "dtap":
+        x, y = point(args[:2])
+        call("POST", f"/session/{sid}/wda/doubleTap", {"x": x, "y": y})
+        print(f"double-tapped {x:g},{y:g}")
+    elif action == "drag":
+        pts = point(args)
+        if len(pts) < 4 or len(pts) % 2:
+            sys.exit("ipad: drag needs x y pairs: <x1> <y1> <x2> <y2> [<x3> <y3> ...]")
+        # Press, move to each point over 400 ms with a short rest, hold 1 s, release.
+        # AUM shows some drag states (a node's DSP % and latency, the reorder target)
+        # only while the finger is still down, and drops a quick release.
+        steps = [{"type": "pointerMove", "duration": 0, "x": pts[0], "y": pts[1]},
+                 {"type": "pointerDown", "button": 0}]
+        for i in range(2, len(pts), 2):
+            steps += [{"type": "pointerMove", "duration": 400, "x": pts[i], "y": pts[i + 1]},
+                      {"type": "pause", "duration": 150}]
+        steps += [{"type": "pause", "duration": 1000}, {"type": "pointerUp", "button": 0}]
+        touch(steps)
+        print("dragged " + " -> ".join(f"{pts[i]:g},{pts[i + 1]:g}" for i in range(0, len(pts), 2)))
+    elif action == "confirm":
+        # AUM's two-step buttons (CLEAR, SAVE SESSION -> OVERWRITE?, REMOVE CHANNEL ->
+        # TAP TO CONFIRM) take the second tap only for about a second.
+        x, y = point(args[:2])
+        call("POST", f"/session/{sid}/wda/tap", {"x": x, "y": y})
+        time.sleep(0.5)
+        call("POST", f"/session/{sid}/wda/tap", {"x": x, "y": y})
+        print(f"tapped {x:g},{y:g} twice")
+    elif action == "type":
+        found = text_fields()
+        if not found:
+            sys.exit("ipad: no text field on screen")
+        eid = eid_of(found[0])
+        call("POST", f"/session/{sid}/element/{eid}/click", {})
+        time.sleep(0.4)
+        call("POST", f"/session/{sid}/element/{eid}/clear", {})
+        call("POST", f"/session/{sid}/element/{eid}/value", {"value": list(args[0])})
+        value = call("GET", f"/session/{sid}/element/{eid}/attribute/value")["value"]
+        print(f"text field now {value!r}")
+    elif action == "enter":
+        call("POST", f"/session/{sid}/wda/keys", {"value": ["\n"]})
+        print("pressed Return")
+    elif action == "fields":
+        for el in text_fields():
+            eid = eid_of(el)
+            rect = call("GET", f"/session/{sid}/element/{eid}/rect")["value"]
+            value = call("GET", f"/session/{sid}/element/{eid}/attribute/value")["value"]
+            print(f"text field at {rect['x']:g},{rect['y']:g} ({rect['width']:g} x {rect['height']:g}): {value!r}")
     elif action == "tap":
         label = args[0]
         # Prefer a button: a button's own text child usually carries the same label.
@@ -248,7 +317,7 @@ try:
             time.sleep(0.5)
         if not found:
             sys.exit(f"ipad: no element labelled {label!r} (list the labels with: ipad tree)")
-        eid = found[0].get("ELEMENT") or next(iter(found[0].values()))
+        eid = eid_of(found[0])
         call("POST", f"/session/{sid}/element/{eid}/click", {})
         print(f"tapped {label!r}" + (f" ({len(found)} matches, used the first)" if len(found) > 1 else ""))
     else:
@@ -296,6 +365,48 @@ cmd_swipe() {
     wda_client swipe "$app" "$1" "$2" "$3" "$4"
 }
 
+cmd_dtap() {
+    [ $# -ge 2 ] || die "usage: $0 dtap <x> <y> [probe|aum|bundle-id]"
+    require_wda
+    local app; app=$(app_arg 2 "$@")
+    wda_client dtap "$app" "$1" "$2"
+}
+
+cmd_confirm() {
+    [ $# -ge 2 ] || die "usage: $0 confirm <x> <y> [probe|aum|bundle-id]"
+    require_wda
+    local app; app=$(app_arg 2 "$@")
+    wda_client confirm "$app" "$1" "$2"
+}
+
+# drag takes any even number of coordinates; an odd count means the last word is the app.
+cmd_drag() {
+    [ $# -ge 4 ] || die "usage: $0 drag <x1> <y1> <x2> <y2> [<x3> <y3> ...] [probe|aum|bundle-id]"
+    require_wda
+    local app=""
+    if [ $(($# % 2)) -eq 1 ]; then app=$(resolve_app "${!#}"); set -- "${@:1:$(($# - 1))}"; fi
+    wda_client drag "$app" "$@"
+}
+
+cmd_type() {
+    [ $# -ge 1 ] || die "usage: $0 type <text> [probe|aum|bundle-id]"
+    require_wda
+    local app; app=$(app_arg 1 "$@")
+    wda_client type "$app" "$1"
+}
+
+cmd_enter() {
+    require_wda
+    local app; app=$(app_arg 0 "$@")
+    wda_client enter "$app"
+}
+
+cmd_fields() {
+    require_wda
+    local app; app=$(app_arg 0 "$@")
+    wda_client fields "$app"
+}
+
 cmd_size() {
     require_wda
     local app; app=$(app_arg 0 "$@")
@@ -331,6 +442,12 @@ case "${1:-}" in
     tap-at) shift; cmd_tap_at "$@" ;;
     hold) shift; cmd_hold "$@" ;;
     swipe) shift; cmd_swipe "$@" ;;
+    dtap) shift; cmd_dtap "$@" ;;
+    drag) shift; cmd_drag "$@" ;;
+    confirm) shift; cmd_confirm "$@" ;;
+    type) shift; cmd_type "$@" ;;
+    enter) shift; cmd_enter "$@" ;;
+    fields) shift; cmd_fields "$@" ;;
     size) shift; cmd_size "$@" ;;
     tree) shift; cmd_tree "$@" ;;
     status) shift; cmd_status "$@" ;;
