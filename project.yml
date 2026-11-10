@@ -158,8 +158,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.teemow.auv3probe.AudioTap
         CODE_SIGN_ENTITLEMENTS: Resources/AUv3Probe.entitlements
 
-  # Unit tests for ProbeKit's pure logic (the staging id the daemon shares),
-  # run on an iOS simulator by CI. No host app: the tests only need ProbeKit.
+  # Unit tests for ProbeKit's pure logic (the staging id the daemon shares,
+  # Bonjour address choice, host formatting), run on an iOS simulator by CI
+  # and `make test`. No host app: the tests only need ProbeKit.
   ProbeKitTests:
     type: bundle.unit-test
     platform: iOS

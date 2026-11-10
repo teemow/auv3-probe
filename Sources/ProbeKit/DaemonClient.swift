@@ -77,7 +77,7 @@ public struct DaemonClient {
         let trimmed = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        let withScheme = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+        let withScheme = Self.escapingZone(trimmed.contains("://") ? trimmed : "http://\(trimmed)")
         guard var components = URLComponents(string: withScheme), components.host != nil else {
             return nil
         }
@@ -87,6 +87,21 @@ public struct DaemonClient {
         components.path = ""
         guard let url = components.url else { return nil }
         self.baseURL = url
+    }
+
+    /// Percent-encode the zone of a bracketed IPv6 literal the way URLs need it
+    /// (RFC 6874): `[fe80::1%en0]` becomes `[fe80::1%25en0]`. DaemonDiscovery
+    /// keeps the zone on link-local addresses, and people type it that way too;
+    /// a bare `%en0` is not valid percent-encoding, so the URL would not parse.
+    /// Already-encoded zones and everything without a bracketed `%` pass as is.
+    static func escapingZone(_ url: String) -> String {
+        guard let open = url.firstIndex(of: "["),
+              let close = url[open...].firstIndex(of: "]"),
+              let percent = url[open..<close].firstIndex(of: "%"),
+              !url[percent..<close].hasPrefix("%25") else {
+            return url
+        }
+        return url.replacingCharacters(in: percent...percent, with: "%25")
     }
 
     /// The WebSocket URL for a given path on the same host (e.g. `audio-stream`),
