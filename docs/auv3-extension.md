@@ -382,9 +382,18 @@ process **auto-discovers** the daemon on the LAN.
 
 `ProbeKit/DaemonDiscovery.swift` runs an `NWBrowser` for the Bonjour service
 type **`_mcpmidi._tcp`**, resolves the chosen service to a concrete `host:port`
-(via a throwaway `NWConnection` so we get the actual reachable address), and
-polls `GET /healthz` to confirm reachability. The daemon's **TXT record** carries
-metadata surfaced in the UI:
+(via throwaway `NWConnection`s, one per IP family, so we get addresses that
+actually accept a connection), and polls `GET /healthz` to confirm reachability.
+
+Which address wins (`ProbeKit/DaemonAddress.swift`, unit-tested in
+`Tests/ProbeKitTests`): IPv4 first, then routable IPv6, then link-local IPv6.
+A link-local IPv6 address keeps its zone (`[fe80::…%en0]:7800`, sent as
+`%25en0` in URLs) because it can't be routed without one. When health polls
+fail three times in a row (~15 s), the address is remembered as failed and the
+service is re-resolved; the next pick prefers an address that hasn't failed,
+and once all have, retries the one that failed longest ago.
+
+The daemon's **TXT record** carries metadata surfaced in the UI:
 
 ```
 version=<daemon semver>        e.g. 1.4.2

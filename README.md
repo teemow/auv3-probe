@@ -137,6 +137,12 @@ A build-only sanity check (no signing) is available via:
 make build
 ```
 
+ProbeKit's unit tests (`Tests/ProbeKitTests`) run on an iOS simulator:
+
+```bash
+make test
+```
+
 ## Building (on Linux, no Mac)
 
 You can also build, sign, and install straight from Linux with a free Apple ID
