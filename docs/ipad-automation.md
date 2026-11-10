@@ -128,7 +128,25 @@ scripts/ipad size aum                        # e.g. "1210 x 834 points (landscap
 scripts/ipad tap-at 1030 30 aum              # tap a point
 scripts/ipad hold 300 140 aum                # long-press (1.2 s)
 scripts/ipad swipe 1100 560 300 560 aum      # drag, e.g. to scroll AUM's mixer
+scripts/ipad dtap 930 500 aum                # double-tap (AUM: reset a fader)
+scripts/ipad drag 842 426 930 426 930 330 aum  # press, move through points, hold, release
+scripts/ipad confirm 1163 137 aum            # two taps 0.5 s apart (two-step buttons)
 ```
+
+Text entry:
+
+```bash
+scripts/ipad type "my name" aum              # clear the first text field, type into it
+scripts/ipad fields aum                      # list text fields and their values
+scripts/ipad enter aum                       # press Return on the on-screen keyboard
+```
+
+`swipe` presses and moves at once, then lets go: right for scrolling, faders and
+knobs. `drag` rests 150 ms at each point and holds 1 s before it releases, which
+AUM needs for gestures that show something only while the finger is down (a node's
+DSP % and latency) or that move things (reordering nodes and channels, moving
+windows). `type` works on the *first* text field on screen; check it with `fields`
+before you save under that name.
 
 Coordinates are **points** in the app's current orientation, not screenshot
 pixels: a screenshot has two pixels per point on Retina iPads, so halve its pixel
@@ -194,7 +212,26 @@ top-bar positions, and the gestures that don't come through automation. To load 
   makes each tap wait about 45 s. The helper sets WDA's `waitForIdleTimeout` and
   `animationCoolOffTimeout` to 0 in every session.
 - **Swipes are W3C touch actions** (down, move over 300 ms, up). WDA's own drag
-  endpoint presses before it moves, which AUM reads as a long-press.
+  endpoint presses before it moves, which AUM reads as a long-press. `drag` is a W3C
+  action too, with rests and a final hold.
+- **Each action takes about 0.8 s.** The helper opens a WDA session per command, and
+  even inside one session a tap takes that long. Two-step buttons that take the
+  second tap only for about a second (AUM's CLEAR, OVERWRITE?, TAP TO CONFIRM) need
+  `confirm`, which sends both taps in one session; two `tap-at` calls with a
+  screenshot or `tree` in between are too slow. For the same reason a tapped-out
+  tempo tops out at about 74 BPM.
+- **Short-lived menus.** Some popovers close by themselves after a few seconds (AUM's
+  AUDIO / MIDI / IMPORT menu on the add-channel tile). Tap the item right after
+  opening it; a `tree` in between (several seconds) is too slow.
+- **The pasteboard is not readable.** WDA's `getPasteboard` returns an empty value
+  for what the app copied (iOS limits pasteboard access to the foreground app), so a
+  copied URL cannot be checked from Linux.
+- **Plugin windows can hang WDA.** With an Apple AU effect's window open in AUM,
+  `tree aum` timed out, and after that every request bound to AUM hung until WDA was
+  restarted. go-ios screenshots kept working. Restart `scripts/ipad wda`, close the
+  window with `tap-at` on its `✕`, and avoid `tree` while such a window is open.
+- **Layout shifts.** AUM's Settings → Show Status Bar moves everything down by about
+  32 points; take a fresh screenshot after changing it.
 
 ## Troubleshooting
 
@@ -208,5 +245,7 @@ top-bar positions, and the gestures that don't come through automation. To load 
 | `tap` reports success, nothing happens | the label is on a caption, not the button | `scripts/ipad tap-at` on the icon |
 | `tap-at` hits the wrong control | screenshot pixels used as points, or the iPad rotated | halve pixel coordinates; check `scripts/ipad size aum` |
 | every action takes about 45 s | an endless animation and XCTest's idle wait | use `scripts/ipad` (it disables the wait); in your own WDA client set `waitForIdleTimeout` to 0 |
+| a two-step button never fires (CLEAR, OVERWRITE?, REMOVE CHANNEL) | the second tap came after the button had reset | `scripts/ipad confirm <x> <y> aum` |
+| `WebDriverAgent did not answer within 60 s` | a plugin window with a remote view is open | restart `scripts/ipad wda`, then `tap-at` the window's `✕` |
 | `xtool launch`: `DebugserverClient.Error.unknown` | iOS 17+ launch needs the tunnel | `scripts/ipad launch …` |
 | `no installed app matching *…` | app not installed, or device not connected | deploy it (`make deploy`) or install WDA (§3) |
