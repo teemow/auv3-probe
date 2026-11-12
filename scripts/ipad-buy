@@ -649,18 +649,18 @@ def follow(s, page, bundle, args, start):
                  "password": "for the password on the iPad",
                  "code": "for the verification code on the iPad",
                  "sign-in": "for the sign-in on the iPad",
-                 "locked": "the iPad is locked; for the install",
+                 "locked": "unlock the iPad so installation can be verified",
                  "sheet": "the purchase sheet is open",
                  "confirm": "the purchase sheet is open"}.get(last_state)
                 or ("downloading" if confirmed else "for a purchase sheet")))
         if ipad_locked():
             if last_state != "locked":
                 say(f"{stamp(start)} the iPad has locked its screen; a confirmed purchase still "
-                    f"downloads. Waiting for {bundle} (the sheet cannot be read while it is locked).")
+                    f"downloads. Unlock it to verify {bundle}: the App Store's Open button "
+                    "cannot be read while it is locked.")
                 last_state = "locked"
-            if installed(bundle):
-                say(f"{stamp(start)} installed: {page.title} ({bundle})")
-                return True
+            # ios apps can list a download placeholder. Only the unlocked
+            # page's Open button together with that listing proves completion.
             continue
         top = Page()
         top.read_top(s.source())
@@ -739,6 +739,13 @@ def follow(s, page, bundle, args, start):
             say(f"{stamp(start)} the purchase sheet is open")
         if state is None and seen_sheet and last_state not in ("start", None, "locked"):
             gone += 1
+            if is_in is None:
+                # A failed inventory read says nothing about the purchase.
+                # Keep watching rather than recommending another purchase.
+                if gone == 1:
+                    say(f"{stamp(start)} cannot read the installed-app list; "
+                        "purchase status is unknown. Waiting to verify it.")
+                continue
             if gone < 2 or (top.offer is None and not is_in):
                 continue     # the sheet may be animating, the page not readable yet
             if top.offer == page.offer and not is_in:
@@ -764,7 +771,7 @@ def follow(s, page, bundle, args, start):
             say(f"{stamp(start)} no purchase sheet and no download 120 s after the tap: stopping. "
                 "If nothing shows on the iPad, nothing was bought.")
             return False
-    say(f"timed out after {args.timeout} s: {bundle} is not installed. Look at the iPad: a sheet "
+    say(f"timed out after {args.timeout} s: installation of {bundle} could not be verified. Look at the iPad: a sheet "
         "may still wait for the person, or the download is still running.")
     return False
 

@@ -248,7 +248,11 @@ With the confirmations the script
    the price again (nothing was bought), when the App Store shows an error, and
    when no sheet and no download appear within 120 s of the tap (at 45 s it
    prints what the iPad shows and asks the person to look); otherwise it waits (`--timeout`, default 600 s) until
-   `ios apps` lists the bundle id and the page's button reads Open.
+   `ios apps` lists the bundle id and the page's button reads Open. If the iPad
+   locks, unlock it so the script can verify Open: an entry in `ios apps` alone
+   can still be a download. If the installed-app list cannot be read, the
+   purchase status is unknown; the script keeps watching instead of reporting
+   that nothing was bought.
 
 ```text
 [  1 s] tapped "7,99 €" once; reading what the iPad shows (Ctrl-C stops this script, not the purchase)
