@@ -32,3 +32,6 @@ Generated/
 
 # graphify knowledge graph (regenerable, rebuilt by the post-commit hook)
 graphify-out/
+
+# Python bytecode (Tests/Scripts imports scripts/ipad-buy and writes it)
+__pycache__/
