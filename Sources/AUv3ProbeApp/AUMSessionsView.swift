@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 import ProbeKit
 
@@ -35,6 +36,9 @@ extension UTType {
 // AUM) remain.
 
 struct AUMSessionsView: View {
+    /// The audio units tab's model, read (not observed) for the sync report.
+    let audioUnits: AudioUnitsModel
+
     @EnvironmentObject private var receiver: Receiver
     @StateObject private var model = AUMSessionsModel()
     @StateObject private var folder = AUMFolderBookmark()
@@ -89,9 +93,11 @@ struct AUMSessionsView: View {
             if folder.isBound {
                 NavigationStack(path: $navPath) {
                     browser(prefix: "")
+                        .background(NavigationBarIdentifier(AUMSessionsAccessibility.folder("")))
                         .toolbar(.hidden, for: .navigationBar)
                         .navigationDestination(for: String.self) { prefix in
                             browser(prefix: prefix)
+                                .background(NavigationBarIdentifier(AUMSessionsAccessibility.folder(prefix)))
                                 .navigationTitle((prefix as NSString).lastPathComponent)
                                 .navigationBarTitleDisplayMode(.inline)
                                 .toolbarBackground(Signalwave.bg, for: .navigationBar)
@@ -110,6 +116,7 @@ struct AUMSessionsView: View {
         }
         .background(Signalwave.bg.ignoresSafeArea())
         .onAppear {
+            engine.audioUnitProgress = { [weak audioUnits] in audioUnits?.progress }
             restoreLastVisitedFolder()
             triggerSync()
         }
@@ -561,7 +568,10 @@ struct AUMSessionsView: View {
     }
 
     /// The expanded conflict row: pick which replica survives. No silent
-    /// overwrite — this is the only way a conflicted file moves again.
+    /// overwrite — this is the only way a conflicted file moves again. Each
+    /// button's accessibility identifier carries the file's path, so UI
+    /// automation presses the button of the file it means and not the first
+    /// one with that label.
     private func conflictResolver(path: String) -> some View {
         HStack(spacing: 8) {
             Button {
@@ -574,6 +584,7 @@ struct AUMSessionsView: View {
                 Label("keep device", systemImage: "ipad")
             }
             .buttonStyle(.signalGhost)
+            .accessibilityIdentifier(AUMSessionsAccessibility.keepDevice(path))
 
             Button {
                 Task {
@@ -585,6 +596,7 @@ struct AUMSessionsView: View {
                 Label("keep controller", systemImage: "desktopcomputer")
             }
             .buttonStyle(.signalGhost(Signalwave.amber))
+            .accessibilityIdentifier(AUMSessionsAccessibility.keepController(path))
 
             Spacer()
         }
@@ -863,3 +875,57 @@ struct AUMSessionsView: View {
         .foregroundStyle(color)
     }
 }
+
+// MARK: - Navigation bar identifier
+
+/// Gives the navigation bar the accessibility identifier of the folder the
+/// browser shows. The bar's title is only the folder's last path part, which
+/// two folders can share; the identifier carries the whole path
+/// (`AUMSessionsAccessibility.folder`). SwiftUI has no modifier for the bar
+/// itself, so a child view controller of the pushed screen sets it on the
+/// `UINavigationBar` whenever that screen comes to the top. The labels and the
+/// bar's children stay as they are.
+private struct NavigationBarIdentifier: UIViewControllerRepresentable {
+    let identifier: String
+
+    init(_ identifier: String) {
+        self.identifier = identifier
+    }
+
+    func makeUIViewController(context: Context) -> Marker {
+        Marker()
+    }
+
+    func updateUIViewController(_ marker: Marker, context: Context) {
+        marker.identifier = identifier
+        marker.apply()
+    }
+
+    final class Marker: UIViewController {
+        var identifier = ""
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            apply()
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            apply()
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            apply()
+        }
+
+        /// Only while this screen is the one shown: a screen further down the
+        /// stack is updated too (its badges change) and must not rename the
+        /// bar of the folder on top.
+        func apply() {
+            guard viewIfLoaded?.window != nil, let navigation = navigationController else { return }
+            navigation.navigationBar.accessibilityIdentifier = identifier
+        }
+    }
+}
+

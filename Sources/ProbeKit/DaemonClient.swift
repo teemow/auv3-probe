@@ -14,6 +14,8 @@ import Foundation
 //                                       is the legacy flat fallback)
 //     GET    /aum-session             — manifest of files the receiver can return
 //                                       (?rev=<n> answers 304 when unchanged)
+//     POST   /aum-session/sync        — what the app's sync made of each file
+//                                       (docs/aum-sync-report.md)
 //     GET    /aum-session/{file...}   — one file's raw bytes (to write into AUM)
 //     DELETE /aum-session/{file...}   — remove one staged file (controller-side)
 //     DELETE /aum-session             — clear all staged files (controller-side)
@@ -177,18 +179,9 @@ public struct DaemonClient {
     /// file's original timestamp (keeping device and controller rows showing
     /// the same date). Returns the decoded summary.
     public func uploadAUMSession(data: Data, filename: String, relativePath: String = "", modified: Date? = nil) async throws -> AUMSessionSummary {
-        var components = URLComponents(
-            url: baseURL.appendingPathComponent("aum-session"),
-            resolvingAgainstBaseURL: false
-        )
-        var items = relativePath.isEmpty
-            ? [URLQueryItem(name: "name", value: filename)]
-            : [URLQueryItem(name: "path", value: relativePath)]
-        if let modified = modified {
-            items.append(URLQueryItem(name: "modified", value: Self.rfc3339.string(from: modified)))
+        guard let url = aumUploadURL(filename: filename, relativePath: relativePath, modified: modified) else {
+            throw DaemonError.badHost(baseURL.absoluteString)
         }
-        components?.queryItems = items
-        guard let url = components?.url else { throw DaemonError.badHost(baseURL.absoluteString) }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -196,6 +189,32 @@ public struct DaemonClient {
         request.httpBody = data
         let body = try await perform(request)
         return try JSONDecoder().decode(AUMSessionSummary.self, from: body)
+    }
+
+    /// The upload's URL: `/aum-session?path=<relative path>&modified=<RFC3339>`
+    /// (`?name=<filename>` without a relative path). The values are escaped
+    /// down to the unreserved characters: `URLComponents.queryItems` leaves `+`
+    /// and `;` as they are, and the daemon's query parser reads `+` as a space
+    /// and drops a pair that holds a `;`. A file in a folder "a + b" was staged
+    /// in "a   b", never listed under its own path, and so uploaded in every
+    /// sync cycle.
+    func aumUploadURL(filename: String, relativePath: String, modified: Date?) -> URL? {
+        guard var components = URLComponents(
+            url: baseURL.appendingPathComponent("aum-session"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            return nil
+        }
+        var items = relativePath.isEmpty
+            ? [("name", filename)]
+            : [("path", relativePath)]
+        if let modified = modified {
+            items.append(("modified", Self.rfc3339.string(from: modified)))
+        }
+        components.percentEncodedQuery = items
+            .map { Self.queryEscaped($0.0) + "=" + Self.queryEscaped($0.1) }
+            .joined(separator: "&")
+        return components.url
     }
 
     /// Build `/aum-session/<relative path>` by appending each path segment, so
@@ -267,6 +286,20 @@ public struct DaemonClient {
         var request = URLRequest(url: try aumSessionURL(path: path))
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30
+        _ = try await perform(request)
+    }
+
+    /// `POST /aum-session/sync` — tell the daemon what the session sync made of
+    /// each file, and how far the audio units' sync is (docs/aum-sync-report.md).
+    /// A daemon from before the report answers 404 or 405; the caller stops
+    /// sending to it.
+    public func sendAUMSyncReport(_ report: AUMSyncReport) async throws {
+        var request = URLRequest(
+            url: baseURL.appendingPathComponent("aum-session").appendingPathComponent("sync"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        request.httpBody = try report.encoded()
         _ = try await perform(request)
     }
 

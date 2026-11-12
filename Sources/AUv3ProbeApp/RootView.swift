@@ -9,6 +9,9 @@ import ProbeKit
 
 struct RootView: View {
     @StateObject private var receiver = Receiver()
+    /// Owned here, not by its tab: the sessions tab reports the audio units'
+    /// progress to the daemon along with its own (docs/aum-sync-report.md).
+    @StateObject private var audioUnits = AudioUnitsModel()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,9 +19,9 @@ struct RootView: View {
             Divider().overlay(Signalwave.grid)
 
             TabView {
-                AudioUnitsView()
+                AudioUnitsView(model: audioUnits)
                     .tabItem { Label("audio units", systemImage: "dot.radiowaves.up.forward") }
-                AUMSessionsView()
+                AUMSessionsView(audioUnits: audioUnits)
                     .tabItem { Label("aum sessions", systemImage: "folder") }
             }
         }

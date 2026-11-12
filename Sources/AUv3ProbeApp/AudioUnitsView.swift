@@ -12,7 +12,7 @@ import ProbeKit
 
 struct AudioUnitsView: View {
     @EnvironmentObject private var receiver: Receiver
-    @StateObject private var model = AudioUnitsModel()
+    @ObservedObject var model: AudioUnitsModel
     @State private var query = ""
 
     private var filteredUnits: [DiscoveredAudioUnit] {

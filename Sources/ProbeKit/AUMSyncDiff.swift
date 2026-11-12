@@ -117,12 +117,17 @@ public enum AUMSyncDiff {
     ) -> AUMSyncPlan {
         let deviceByPath = Dictionary(device.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
         let controllerByPath = Dictionary(controller.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
+        // Where the controller keeps a path in another case (its file system
+        // folds case, the iPad's does not).
+        let controllerByFoldedPath = Dictionary(
+            controller.map { ($0.path.lowercased(), $0.path) }, uniquingKeysWith: { a, _ in a })
 
         var plan = AUMSyncPlan(actions: [], index: [:])
         for path in Set(deviceByPath.keys).union(controllerByPath.keys).sorted() {
+            let alias = controllerByFoldedPath[path.lowercased()].flatMap { $0 == path ? nil : $0 }
             let decision = decide(
                 device: deviceByPath[path], controller: controllerByPath[path],
-                index: index[path], held: held.contains(path))
+                index: index[path], held: held.contains(path), alias: alias)
             plan.actions.append((path, decision.action))
             plan.index[path] = decision.index
         }
@@ -138,24 +143,25 @@ public enum AUMSyncDiff {
         held: Bool = false,
         alias: String? = nil
     ) -> AUMSyncDecision {
-        // A conflict the user has not resolved yet stays a conflict; the diff
-        // must not silently flip it back to a copy.
-        if held, device != nil, controller != nil {
-            return AUMSyncDecision(.conflict, index: index)
-        }
         switch (device, controller) {
         case (nil, nil):
             return AUMSyncDecision(.none, index: nil)
 
         case (let file?, nil):
-            // Device-only. Mirror it to the controller — also the v1 "deletion
-            // does not propagate" path: a controller-side delete is restored
-            // from the surviving device copy. Midimaps cannot be uploaded
-            // (the controller's upload route validates a session graph), so
-            // they stay device-only without complaint.
+            // Device-only. Midimaps cannot be uploaded (the controller's
+            // upload route validates a session graph), so they stay
+            // device-only without complaint.
             if file.isMidiMap {
                 return AUMSyncDecision(.none, index: nil)
             }
+            // An upload the controller has not listed since: it keeps the file
+            // under another path, or dropped it. Sending the same bytes again
+            // changes nothing, so the file waits until it changes.
+            if let idx = index, idx.controllerListed == false, !deviceChanged(file, since: idx) {
+                return AUMSyncDecision(.unlisted(alias: alias), index: matching(idx, file))
+            }
+            // New on the device, or the v1 "deletion does not propagate" path:
+            // a controller-side delete is restored from the surviving copy.
             return AUMSyncDecision(.push, index: index)
 
         case (nil, _?):
@@ -164,7 +170,7 @@ public enum AUMSyncDiff {
             return AUMSyncDecision(.pull(updatesExisting: false), index: index)
 
         case (let file?, let entry?):
-            guard let idx = index else {
+            guard var idx = index else {
                 // Both sides exist but we never synced them (first run after
                 // linking, or a fresh install). Equal sizes are taken as the
                 // same file; different sizes are a conflict — bootstrapping
@@ -172,39 +178,65 @@ public enum AUMSyncDiff {
                 if file.bytes == entry.bytes {
                     return AUMSyncDecision(.none, index: AUMSyncIndexEntry(
                         deviceModified: file.modified, deviceBytes: file.bytes,
-                        controllerModified: entry.modified, controllerBytes: entry.bytes))
+                        controllerModified: entry.modified, controllerBytes: entry.bytes,
+                        contentHash: file.contentHash, controllerListed: true))
                 }
                 return AUMSyncDecision(.conflict, index: nil)
             }
+            idx.controllerListed = true
             let deviceChanged = deviceChanged(file, since: idx)
             let controllerChanged = entry.modified != idx.controllerModified || entry.bytes != idx.controllerBytes
+            if !deviceChanged {
+                idx = matching(idx, file)
+            }
+            let action: AUMSyncAction
             switch (deviceChanged, controllerChanged) {
             case (false, false):
                 return AUMSyncDecision(.none, index: idx)
             case (true, true):
-                return AUMSyncDecision(.conflict, index: idx)
+                action = .conflict
             case (true, false):
-                return AUMSyncDecision(file.isMidiMap ? .none : .push, index: idx)
+                action = file.isMidiMap ? .none : .push
             case (false, true):
-                return AUMSyncDecision(.pull(updatesExisting: true), index: idx)
+                action = .pull(updatesExisting: true)
             }
+            // A conflict nobody has resolved yet is not silently turned into a
+            // copy. (It ends above, once both sides match the index again.)
+            return AUMSyncDecision(held && action != .none ? .conflict : action, index: idx)
         }
     }
 
     /// Whether the engine has to read the file's bytes before the diff can say
-    /// if it changed.
+    /// if it changed: its date moved, its size did not, and the index knows the
+    /// bytes of the last sync. The engine then sets `contentHash`.
     public static func needsContentCheck(_ file: AUMSyncDeviceFile, index: AUMSyncIndexEntry?) -> Bool {
-        false
+        guard let idx = index, idx.contentHash != nil, file.contentHash == nil else { return false }
+        return file.bytes == idx.deviceBytes && modifiedMoved(file.modified, idx.deviceModified)
     }
 
+    /// A file's date alone does not make it changed: the app's own write, a
+    /// restore or a copy all move it. With the size kept, the bytes decide
+    /// where the index knows them.
     static func deviceChanged(_ file: AUMSyncDeviceFile, since idx: AUMSyncIndexEntry) -> Bool {
         if file.bytes != idx.deviceBytes { return true }
-        return modifiedMoved(file.modified, idx.deviceModified)
+        guard modifiedMoved(file.modified, idx.deviceModified) else { return false }
+        if let known = idx.contentHash, let now = file.contentHash {
+            return known != now
+        }
+        return true
+    }
+
+    /// The entry of an unchanged file, with the date the file has now, so the
+    /// next cycle need not read its bytes again.
+    private static func matching(_ idx: AUMSyncIndexEntry, _ file: AUMSyncDeviceFile) -> AUMSyncIndexEntry {
+        var idx = idx
+        idx.deviceModified = file.modified
+        return idx
     }
 
     /// Compare mtimes at 1-second granularity: the wire format (RFC3339)
     /// carries whole seconds, so finer differences are round-trip noise.
-    static func modifiedMoved(_ current: Double?, _ indexed: Double?) -> Bool {
+    public static func modifiedMoved(_ current: Double?, _ indexed: Double?) -> Bool {
         switch (current, indexed) {
         case (nil, nil): return false
         case (let a?, let b?): return abs(a - b) >= 1
