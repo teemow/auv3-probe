@@ -24,8 +24,9 @@
 #   passcode [--dry-run]  type the passcode into an app's passcode prompt in front,
 #                         such as Settings > Face ID & Code (asks for it; one try)
 #   buy <app id or URL> [--confirm-name <name> --confirm-price <price>]
-#                         show an App Store app's name, developer and price; with
-#                         the person's confirmation, buy or get it (scripts/ipad-buy)
+#                         show an App Store app's (or bundle's) name, developer and
+#                         price; with the person's confirmation, buy or get it
+#                         (scripts/ipad-buy)
 #
 # One-time setup (go-ios, the disk image, WebDriverAgent, UI Automation) is in
 # docs/ipad-automation.md. Nothing device- or account-specific lives here: bundle

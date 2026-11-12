@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 # ipad-buy: open an app's page in the App Store on the iPad, read what it
-# offers, and, with a person's confirmation, buy or download that one app.
-# Also run as `scripts/ipad buy`.
+# offers, and, with a person's confirmation, buy or download that one app
+# (or that one App Store bundle of apps). Also run as `scripts/ipad buy`.
 #
 #   ipad-buy <app id or URL>
 #       Look only (the default): open the page and print the app's name,
 #       developer, price, whether it has in-app purchases, and what the
 #       script would refuse. Taps nothing that buys or downloads.
+#   ipad-buy <bundle URL>   (https://apps.apple.com/<cc>/app-bundle/<name>/id<id>)
+#       The same for an App Store bundle, plus the apps in it with their
+#       prices, bundle ids and in-app purchases. A bare id that Apple's lookup
+#       does not know is tried as a bundle.
 #   ipad-buy <app id or URL> --confirm-name <name> --confirm-price <price>
 #       Buy (or get, or re-download) exactly that app: tap its price, Get or
 #       re-download button once, then read Apple's sheet from the accessibility
@@ -50,6 +54,16 @@
 # The bundle id the install check waits for, and a cross-check of name and
 # price, come from Apple's public lookup (itunes.apple.com/lookup), which is
 # sent the app id and the country and nothing else.
+#
+# A bundle is one purchase at one price. The lookup has no entry for bundles,
+# so its name, price and apps come from Apple's public web page of the bundle
+# (apps.apple.com/<cc>/app-bundle/id<id>, sent the id and the country and
+# nothing else), and each app in it is checked against the lookup by its id.
+# The script buys a bundle only at its price and only while none of its apps
+# is bought or installed: Apple then asks a reduced "complete my bundle" price
+# that no public source confirms (buy the other apps one by one instead). It
+# refuses when the iPad lists other apps than Apple's page, and it waits until
+# every app in the bundle is installed and its row on the page reads Open.
 #
 # Options:
 #   --timeout <seconds>  how long to wait for the install (default 600)
@@ -237,16 +251,19 @@ def label(n):
 # --- The page ---------------------------------------------------------------
 
 def app_id_of(arg):
+    """(id, country from the URL or None, whether the URL names a bundle)."""
     m = re.fullmatch(r"(?:id)?(\d{5,12})", arg.strip())
     if m:
-        return m.group(1), None
+        return m.group(1), None, False
     u = urllib.parse.urlparse(arg.strip())
     if u.scheme in ("https", "http", "itms-apps") and u.netloc in ("apps.apple.com", "itunes.apple.com"):
         m = re.search(r"/id(\d{5,12})(?:$|[/?])", u.path + "/")
         if m:
             cc = re.match(r"/([a-z]{2})/", u.path)
-            return m.group(1), cc.group(1) if cc else None
-    die(f"not an App Store app id or URL: {arg!r} (e.g. 1234567890 or https://apps.apple.com/<cc>/app/<name>/id1234567890)")
+            return m.group(1), cc.group(1) if cc else None, "/app-bundle/" in u.path
+    die(f"not an App Store app id or URL: {arg!r} (e.g. 1234567890, "
+        "https://apps.apple.com/<cc>/app/<name>/id1234567890 or "
+        "https://apps.apple.com/<cc>/app-bundle/<name>/id1234567890)")
 
 
 def device_country():
@@ -269,6 +286,70 @@ def lookup(app_id, country):
         say(f"note: Apple's lookup did not answer ({e})")
         return None
     return results[0] if results else None
+
+
+def bundle_lookup(bundle_id, country):
+    """Apple's public web page of an App Store bundle, which the lookup does
+    not know: name, price, developer and the apps in it. None when there is
+    no such bundle or the page cannot be read."""
+    url = f"https://apps.apple.com/{country or 'us'}/app-bundle/id{bundle_id}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            html = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            say(f"note: Apple's bundle page did not answer ({e})")
+        return None
+    except Exception as e:
+        say(f"note: Apple's bundle page did not answer ({e})")
+        return None
+    return parse_bundle_page(html, bundle_id)
+
+
+def parse_bundle_page(html, bundle_id):
+    """The bundle from the page's own data (the JSON the App Store web app
+    renders from); None for any other page or a shape this does not know."""
+    m = re.search(r"<script[^>]*\bid=[\"']?serialized-server-data[\"']?[^>]*>(.*?)</script>", html, re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))["data"][0]
+        intent, page = data["intent"], data["data"]
+        if intent.get("$kind") != "BundlePageIntent" or str(intent.get("id")) != str(bundle_id):
+            return None
+        offer = page["titleOfferDisplayProperties"]
+        apps = []
+        for child in page["lockup"]["children"]:
+            o = child.get("offerDisplayProperties") or {}
+            iap = o.get("hasInAppPurchases")
+            apps.append({"id": str(child["adamId"]), "name": child["title"],
+                         "bundleId": child.get("bundleId"), "formattedPrice": o.get("priceFormatted"),
+                         "iap": iap if isinstance(iap, bool) else None})
+        if not apps:
+            return None
+        return {"kind": "bundle", "trackName": page["title"], "formattedPrice": offer["priceFormatted"],
+                "price": 0 if offer.get("isFree") is True else None,
+                "artistName": (page.get("developerAction") or {}).get("title"),
+                "regularPrice": page.get("regularPriceFormatted"), "apps": apps}
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def catalogue(app_id, country, bundle):
+    """(Apple's public entry for the id, whether it is a bundle). An app's
+    entry is the lookup's. A bundle (named so by its URL, or an id the lookup
+    does not know) comes from its web page, with each app in it looked up by
+    its id and whether `ios apps` lists it already."""
+    entry = None if bundle else lookup(app_id, country)
+    if entry is None:
+        found = bundle_lookup(app_id, country)
+        if found:
+            entry, bundle = found, True
+    if bundle and entry:
+        for a in entry["apps"]:
+            a["lookup"] = lookup(a["id"], country)
+        entry["installed"] = listed([a["bundleId"] for a in entry["apps"] if a.get("bundleId")])
+    return entry, bundle
 
 
 def offer_kind(state, text):
@@ -297,8 +378,27 @@ class Page:
         self.iap = None            # "yes", "no" or None (not read)
         self.info_seen = False
         self.info_done = False
+        self.children = {}         # a bundle's apps: app id -> (title, (state, label) or None)
+
+    def read_children(self, tree):
+        """A bundle page's rows of the apps in it ("2 Apps in diesem Paket")."""
+        for n, _ in walk(tree):
+            m = re.match(r"AppStore\.shelfItem\.smallLockup\[id=(\d+),parentId=bundleChildren[,\]]", ident(n))
+            if not m:
+                continue
+            title, offers = None, set()
+            for c, _ in walk(n):
+                i, l = ident(c), label(c)
+                if i == "AppStore.shelfItemSubComponent.title":
+                    title = l
+                elif i.startswith("AppStore.offerButton"):
+                    s = re.search(r"state=([^\],]+)", i)
+                    offers.add((s.group(1) if s else "", l))
+            # Buttons nest a copy of themselves; two distinct ones are unreadable.
+            self.children[m.group(1)] = (title, offers.pop() if len(offers) == 1 else None)
 
     def read_top(self, tree):
+        self.read_children(tree)
         lockup = None
         for n, _ in walk(tree):
             if ident(n).startswith("AppStore.shelfItem.productTopLockup"):
@@ -355,18 +455,20 @@ class Page:
             self.iap = "no"
 
 
-def open_page(app_id, expect=None, wait=20):
-    """Open the app's page; wait until it shows a title and an offer (and the
-    expected name, when Apple's lookup knows it), at most `wait` seconds."""
+def open_page(app_id, expect=None, wait=20, bundle=False, apps=()):
+    """Open the app's (or the bundle's) page; wait until it shows a title and
+    an offer (and the expected name, when Apple's lookup knows it, and the
+    rows of the bundle's apps), at most `wait` seconds."""
     s = Session(STORE)
     try:
-        s.post("/url", {"url": f"itms-apps://apps.apple.com/app/id{app_id}"})
+        s.post("/url", {"url": f"itms-apps://apps.apple.com/{'app-bundle' if bundle else 'app'}/id{app_id}"})
         # A product page pushed on top of another one shows the old one first.
         time.sleep(2)
         deadline = time.time() + wait
         while True:
             page = Page()
-            if page.read_top(s.source()) and page.offer and (expect is None or norm(page.title) == norm(expect)):
+            if page.read_top(s.source()) and page.offer and (expect is None or norm(page.title) == norm(expect)) \
+                    and set(apps) <= set(page.children):
                 break
             if time.time() > deadline:
                 break
@@ -377,8 +479,8 @@ def open_page(app_id, expect=None, wait=20):
         raise
 
 
-def read_page(app_id, expect):
-    s, page = open_page(app_id, expect)
+def read_page(app_id, expect, bundle=False, apps=()):
+    s, page = open_page(app_id, expect, bundle=bundle, apps=apps)
     try:
         if not page.title:
             return page
@@ -419,8 +521,11 @@ def check(page, entry, args):
     if page.iap is None or page.iap == "unreadable":
         reasons.append("whether the app has in-app purchases could not be read")
     if entry is None:
-        reasons.append("Apple's lookup has no entry for this id in this country (try --country)")
+        reasons.append("Apple's lookup (for a bundle: its public bundle page) has no entry for this id "
+                       "in this country (try --country)")
     else:
+        if entry.get("kind") == "bundle":
+            reasons += check_bundle(page, entry, kind)
         if norm(entry.get("trackName")) != norm(page.title):
             reasons.append(f"the page title {shown(page.title)} is not the id's name {shown(entry.get('trackName'))}: "
                            "the wrong page may be in front")
@@ -438,29 +543,101 @@ def check(page, entry, args):
     return reasons
 
 
+def check_bundle(page, entry, kind):
+    """The reasons not to buy a bundle, on top of those for any page."""
+    reasons = []
+    if kind not in (None, "price"):
+        reasons.append(f"a bundle is bought only at its price, and its button reads "
+                       f"{shown(page.offer[1]) if page.offer else 'none'} (the apps of a bundle "
+                       "bought before are downloaded one by one)")
+    apps = entry["apps"]
+    if sorted(page.children) != sorted(a["id"] for a in apps):
+        reasons.append(f"the page lists {len(page.children)} apps in the bundle "
+                       f"({', '.join(shown(t) for t, _ in page.children.values()) or 'none'}), Apple's "
+                       f"bundle page {len(apps)} ({', '.join(shown(a['name']) for a in apps)})")
+    have = entry.get("installed")
+    if have is None:
+        reasons.append("`ios apps` does not answer: whether an app of the bundle is installed already "
+                       "could not be read")
+    for a in apps:
+        name, row, lk = shown(a["name"]), page.children.get(a["id"]), a.get("lookup")
+        if row:
+            title, offer = row
+            if norm(title) != norm(a["name"]):
+                reasons.append(f"the page names app {a['id']} {shown(title)}, Apple's bundle page {name}")
+            if (offer_kind(*offer) if offer else None) not in ("price", "get"):
+                reasons.append(f"{name} is bought or installed already, or its button cannot be read "
+                               f"({shown(offer[1]) if offer else 'none'}): Apple then asks a reduced price "
+                               "for the bundle that no public source confirms. Get the other apps one by one.")
+        if have and a.get("bundleId") in have:
+            reasons.append(f"{name} ({a['bundleId']}) is installed already")
+        if not a.get("bundleId"):
+            reasons.append(f"Apple's bundle page gives no bundle id for {name}")
+        if lk is None:
+            reasons.append(f"Apple's lookup has no entry for {name} (id {a['id']}) in this country")
+        else:
+            if norm(lk.get("trackName")) != norm(a["name"]):
+                reasons.append(f"Apple's lookup names app {a['id']} {shown(lk.get('trackName'))}, the bundle "
+                               f"page {name}")
+            if lk.get("bundleId") != a.get("bundleId"):
+                reasons.append(f"Apple's lookup gives {name} the bundle id {lk.get('bundleId')}, the bundle "
+                               f"page {a.get('bundleId')}")
+        if a.get("iap") is None:
+            reasons.append(f"whether {name} has in-app purchases could not be read")
+    return reasons
+
+
 def report(app_id, page, entry):
     kind = offer_kind(*page.offer) if page.offer else None
-    say(f"app id:      {app_id}")
+    bundle = bool(entry) and entry.get("kind") == "bundle"
+    if bundle:
+        say(f"bundle:      {app_id} (an App Store bundle of {len(entry['apps'])} apps, one purchase)")
+    else:
+        say(f"app id:      {app_id}")
     say(f"name:        {page.title or 'unreadable'}")
     say(f"developer:   {page.developer or 'unreadable'}")
     say(f"price:       {price_text(kind, page.offer[1]) if page.offer else 'unreadable'}"
         + (f"   (button: {shown(page.offer[1])})" if page.offer else ""))
     say(f"in-app purchases: {page.iap or 'unreadable'}")
-    if entry:
+    if bundle:
+        have = entry.get("installed")
+        say("apps in it:")
+        for a in entry["apps"]:
+            row = page.children.get(a["id"])
+            button = shown(row[1][1]) if row and row[1] else "unreadable"
+            iap = {True: "yes", False: "no"}.get(a.get("iap"), "unreadable")
+            say(f"  {a['name']}: {a.get('formattedPrice')} alone (button {button}), bundle id "
+                f"{a.get('bundleId')}, in-app purchases: {iap}"
+                + (", installed" if have and a.get("bundleId") in have else ""))
+        say(f"bundle page: {entry.get('trackName')} by {entry.get('artistName')}, {entry.get('formattedPrice')}"
+            + (f" (the apps alone: {entry.get('regularPrice')})" if entry.get("regularPrice") else ""))
+    elif entry:
         say(f"bundle id:   {entry.get('bundleId')}")
         say(f"lookup:      {entry.get('trackName')} by {entry.get('artistName')}, {entry.get('formattedPrice')}")
 
 
 # --- Installing -------------------------------------------------------------
 
-def installed(bundle):
+def listed(bundles):
+    """Which of these bundle ids `ios apps` lists; None when it does not answer."""
     try:
         out = subprocess.run(["ios", "apps"], capture_output=True, text=True, timeout=60).stdout
         data = json.loads(out.strip().splitlines()[-1])
     except Exception:
         return None
     apps = data if isinstance(data, list) else data.get("apps", [])
-    return any(a.get("CFBundleIdentifier") == bundle for a in apps)
+    ids = {a.get("CFBundleIdentifier") for a in apps}
+    return {b for b in bundles if b in ids}
+
+
+def finished(top, apps):
+    """Whether the page proves the install: the app's button reads Open, or,
+    for a bundle, the row of every app in it does (the bundle's own button
+    never reads Open)."""
+    if not apps:
+        return bool(top.offer) and top.offer[0] == "open"
+    rows = getattr(top, "children", None) or {}
+    return all(rows.get(a) and rows[a][1] and rows[a][1][0] == "open" for a in apps)
 
 
 def front_bundle():
@@ -648,28 +825,36 @@ def stamp(start):
 
 
 def buy(app_id, entry, page_read, args):
-    bundle = entry["bundleId"]
-    if installed(bundle) is None:
+    # For a bundle: its apps' ids and the bundle ids the install check waits for.
+    apps = {a["id"]: a["bundleId"] for a in entry["apps"]} if entry.get("kind") == "bundle" else None
+    if listed(list(apps.values()) if apps else [entry["bundleId"]]) is None:
         raise Refusal("`ios apps` does not answer (is the go-ios tunnel up?). Nothing was tapped.")
-    s, page = open_page(app_id, page_read.title)
+    s, page = open_page(app_id, page_read.title, bundle=bool(apps), apps=apps or ())
     try:
         # The page as it is now, at the top, must still be what was checked.
-        if (page.title, page.offer, page.notices) != (page_read.title, page_read.offer, page_read.notices):
+        if (page.title, page.offer, page.notices, page.children) != \
+                (page_read.title, page_read.offer, page_read.notices, page_read.children):
             raise Refusal(f"the page changed between reading and tapping ({shown(page.title)}, {shown(page.offer[1]) if page.offer else 'none'}). "
                           "Nothing was tapped.")
         tap_offer(s, page)
         start = time.time()
         say(f"{stamp(start)} tapped {shown(page.offer[1])} once; reading what the iPad shows "
             f"(Ctrl-C stops this script, not the purchase)")
-        return follow(s, page, bundle, args, start)
+        return follow(s, page, apps or entry["bundleId"], args, start)
     finally:
         s.close()
 
 
-def follow(s, page, bundle, args, start):
+def follow(s, page, target, args, start):
     """Watch the sheet and the page after the tap, say what the person must
     do, and report each step until the app is installed or it is clear that
-    it will not be."""
+    it will not be. `target` is the app's bundle id or, for an App Store
+    bundle, a dict of the ids of the apps in it to their bundle ids."""
+    apps = target if isinstance(target, dict) else None
+    bundles = sorted(apps.values()) if apps else [target]
+    bundle = ", ".join(bundles)                # for messages
+    what = "bundle" if apps else "app"
+    rows = dict(getattr(page, "children", None) or {}) if apps else {}
     kind = offer_kind(*page.offer)
     deadline = start + args.timeout
     seen_sheet = confirmed = typed = asked = warned = False
@@ -702,8 +887,9 @@ def follow(s, page, bundle, args, start):
             continue
         top = Page()
         top.read_top(s.source())
-        is_in = installed(bundle)
-        if is_in and top.offer and top.offer[0] == "open":
+        got = listed(bundles)
+        is_in = None if got is None else len(got) == len(bundles)     # all of them
+        if is_in and finished(top, apps):
             say(f"{stamp(start)} installed: {page.title} ({bundle})")
             return True
         if top.offer and top.offer != last_offer:
@@ -712,12 +898,22 @@ def follow(s, page, bundle, args, start):
             # paid: only a later state, or the sheet closing on a changed
             # button (below), says the purchase went through.
             progressed = top.offer != page.offer and top.offer[0] not in PENDING_STATES
-            say(f"{stamp(start)} the app's button now reads {shown(top.offer[1])} (state {top.offer[0]})"
+            say(f"{stamp(start)} the {what}'s button now reads {shown(top.offer[1])} (state {top.offer[0]})"
                 + ("; the purchase went through, downloading" if progressed else
                    "; the App Store waits for the purchase sheet" if top.offer[0] in PENDING_STATES else ""))
             if progressed:
                 seen_sheet = confirmed = True
             last_offer = top.offer
+        for a in apps or ():
+            # A bundle's apps download one by one, each on its own row.
+            row = (getattr(top, "children", None) or {}).get(a)
+            if row and row[1] and row != rows.get(a):
+                progressed = row[1] != page.children[a][1] and row[1][0] not in PENDING_STATES
+                say(f"{stamp(start)} {shown(row[0])} now reads {shown(row[1][1])} (state {row[1][0]})"
+                    + ("; the purchase went through, downloading" if progressed and not confirmed else ""))
+                if progressed:
+                    seen_sheet = confirmed = True
+                rows[a] = row
         screen = Screen(s)
         state = screen.state()
         if screen.texts != last_texts and (state or seen_sheet):
@@ -793,7 +989,7 @@ def follow(s, page, bundle, args, start):
                 say(f"{stamp(start)} the tap on the sheet's button failed; the sheet is left as it is.")
                 return False
             confirmed = True
-            say(f"{stamp(start)} confirmed the purchase sheet once (it showed this app"
+            say(f"{stamp(start)} confirmed the purchase sheet once (it showed this {what}"
                 + (" and this price" if kind == "price" else "") + ")")
         elif state in TODO and state != last_state:
             say(f"{stamp(start)} {TODO[state]}")
@@ -808,17 +1004,19 @@ def follow(s, page, bundle, args, start):
                     say(f"{stamp(start)} cannot read the installed-app list; "
                         "purchase status is unknown. Waiting to verify it.")
                 continue
-            if gone < 2 or (top.offer is None and not is_in):
+            unread = top.offer is None or bool(apps) and not set(apps) <= set(top.children)
+            if gone < 2 or (unread and not is_in):
                 continue     # the sheet may be animating, the page not readable yet
-            if top.offer == page.offer and not is_in:
-                # Back to the price button without a download: the sheet closed.
-                say(f"{stamp(start)} the sheet has closed and the app's button reads "
+            if top.offer == page.offer and (not apps or top.children == page.children) and not got:
+                # Back to the price button (and, for a bundle, every app's row
+                # as it was) without a download: the sheet closed.
+                say(f"{stamp(start)} the sheet has closed and the {what}'s button reads "
                     f"{shown(top.offer[1])} again: nothing was bought (cancelled on the iPad, or "
                     "Apple's time to confirm ran out). Run the command again with the person at "
                     "the iPad.")
                 return False
             confirmed = True
-            say(f"{stamp(start)} the sheet has closed; the app is downloading")
+            say(f"{stamp(start)} the sheet has closed; the {what} is downloading")
         gone = 0
         last_state = state
         if not seen_sheet and now - quiet_since > 45 and not warned:
@@ -896,7 +1094,7 @@ def main():
     if shutil.which("ios") is None:
         die("'ios' (go-ios) not found on PATH")
 
-    app_id, url_cc = app_id_of(args.app)
+    app_id, url_cc, bundle = app_id_of(args.app)
     buying = args.confirm_price is not None
     locked = call("GET", "/wda/locked", timeout=10).get("value")
     if locked is not False:
@@ -905,8 +1103,9 @@ def main():
     held = take_lock(app_id)
     try:
         country = (args.country or url_cc or device_country() or "us").lower()
-        entry = lookup(app_id, country)
-        page = read_page(app_id, entry.get("trackName") if entry else None)
+        entry, bundle = catalogue(app_id, country, bundle)
+        apps = [a["id"] for a in entry["apps"]] if bundle and entry else ()
+        page = read_page(app_id, entry.get("trackName") if entry else None, bundle, apps)
         report(app_id, page, entry)
         reasons = check(page, entry, args)
         if not buying:
@@ -916,9 +1115,11 @@ def main():
                     say(f"  - {r}")
             else:
                 kind = offer_kind(*page.offer)
-                say("to buy it, after the person who pays has confirmed this app and this price:")
+                say(f"to buy it, after the person who pays has confirmed this {'bundle' if bundle else 'app'} "
+                    "and this price:")
                 price = " ".join(unicodedata.normalize("NFKC", price_text(kind, page.offer[1])).split())
-                say(f"  scripts/ipad buy {app_id} --confirm-name {shlex.quote(page.title)} "
+                which = f"https://apps.apple.com/{country}/app-bundle/id{app_id}" if bundle else app_id
+                say(f"  scripts/ipad buy {which} --confirm-name {shlex.quote(page.title)} "
                     f"--confirm-price {shlex.quote(price)}")
             say("looked only: nothing was bought or downloaded")
             return 0
