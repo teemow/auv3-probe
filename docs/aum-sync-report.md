@@ -82,8 +82,9 @@ repeated; the next cycle sends its own.
 - **At the end of every sync cycle** that reached the daemon. The app runs a
   cycle when the daemon becomes reachable, when the app comes to the front,
   when the tab appears, and every 20 seconds while the app is in front. In this
-  report `in_flight` is empty, unless the cycle put a copy off: a file that
-  changed while the cycle ran is left to the next cycle and stays listed.
+  report `in_flight` is empty, unless the cycle put copies off (its plan was
+  more than two minutes old, or a file changed again while it ran): those stay
+  listed and the next cycle takes them up.
 - **Before the first copy** of a cycle that has something to copy. `in_flight`
   then lists every queued copy.
 - **After a conflict was resolved** on its row.
