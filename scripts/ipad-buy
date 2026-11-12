@@ -1,0 +1,598 @@
+#!/usr/bin/env python3
+# ipad-buy: open an app's page in the App Store on the iPad, read what it
+# offers, and, with a person's confirmation, buy or download that one app.
+# Also run as `scripts/ipad buy`.
+#
+#   ipad-buy <app id or URL>
+#       Look only (the default): open the page and print the app's name,
+#       developer, price, whether it has in-app purchases, and what the
+#       script would refuse. Taps nothing that buys or downloads.
+#   ipad-buy <app id or URL> --confirm-name <name> --confirm-price <price>
+#       Buy (or get, or re-download) exactly that app: tap its price, Get or
+#       re-download button once, then wait until the app is installed.
+#
+# --confirm-price takes the price exactly as the look prints it ("22,99 €",
+# "$9.99"), `free` for a free app, or `redownload` for an app bought before.
+# The script refuses on any difference between the confirmation and the page,
+# on a subscription or any other offer it does not know, and on anything it
+# cannot read. One app per call.
+#
+# An agent passes the confirmation only after the person who pays has
+# confirmed that app and that total in their own words, for this purchase.
+# An earlier approval does not carry over to another app or another price.
+#
+# No credential passes through this script: it takes no Apple ID password,
+# payment detail or other secret, from an argument, the environment, a file
+# or a log. When the App Store asks for authentication (a password, Face ID
+# or Touch ID, a sign-in), the script leaves the sheet as it is, says that a
+# person has to do this step on the iPad, and only waits. It never buys
+# in-app purchases or subscriptions and changes no account, payment or App
+# Store setting.
+#
+# The bundle id the install check waits for, and a cross-check of name and
+# price, come from Apple's public lookup (itunes.apple.com/lookup), which is
+# sent the app id and the country and nothing else.
+#
+# Options:
+#   --timeout <seconds>  how long to wait for the install (default 600)
+#   --country <cc>       App Store country for the cross-check against
+#                        Apple's public lookup (default: from the URL, else
+#                        the iPad's region)
+#
+# Needs WebDriverAgent running (`scripts/ipad wda`), the go-ios tunnel (the
+# install check uses `ios apps`) and python3. It takes the iPad lock
+# $IPAD_LOCK (default ~/.cache/go-ios/ipad.lock) and refuses while another
+# holder has it; a caller that already holds the lock sets IPAD_LOCK_HELD=1.
+# Overrides: IPAD_WDA_URL or WDA_PORT, GOIOS_CACHE, IPAD_LOCK.
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+
+WDA = os.environ.get("IPAD_WDA_URL") or f"http://127.0.0.1:{os.environ.get('WDA_PORT', '8100')}"
+CACHE = os.environ.get("GOIOS_CACHE") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "go-ios")
+LOCK = os.environ.get("IPAD_LOCK") or os.path.join(CACHE, "ipad.lock")
+STORE = "com.apple.AppStore"
+AUM = "com.kymatica.AUM"
+
+# Words on the App Store's buttons, in the languages the iPad may be set to.
+# The script refuses whatever it does not recognise, so a missing language
+# makes it refuse, never buy.
+GET_WORDS = {"get", "laden", "gratis", "free", "obtenir", "obtener", "ottieni"}
+OPEN_WORDS = {"open", "öffnen", "ouvrir", "abrir", "apri"}
+REDOWNLOAD_WORDS = {"redownload", "download", "erneut laden", "herunterladen"}
+IAP_WORDS = ("in-app purchases", "in-app-käufe", "achats intégrés", "compras dentro de la app",
+             "acquisti in-app")
+YES_WORDS = {"yes", "ja", "oui", "sí", "si"}
+SUBSCRIPTION = re.compile(r"abo|subscri|arcade|trial|testen|monat|month|jahr|year|woche|week",
+                          re.IGNORECASE)
+# Texts of the purchase and authentication sheets.
+AUTH = re.compile(r"passwor|kennwort|face id|touch id|doppel|double.?click|anmelden|sign in|"
+                  r"apple[- ]?(id|account)|apple-account|bezahl|pay|kaufen|buy|install",
+                  re.IGNORECASE)
+
+
+class Refusal(Exception):
+    pass
+
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+def die(msg):
+    print(f"ipad-buy: {msg}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def shown(s):
+    """A page text for messages: quoted, no-break spaces as plain ones."""
+    return '"' + " ".join(unicodedata.normalize("NFKC", s or "").split()) + '"'
+
+
+def norm(s):
+    """Compare texts the way they read: no-break spaces as spaces, case-blind."""
+    s = unicodedata.normalize("NFKC", s or "")
+    s = s.replace(" ", " ").replace(" ", " ").replace("⁨", "").replace("⁩", "")
+    s = s.replace("⁦", "").replace("⁧", "")
+    return " ".join(s.split()).casefold()
+
+
+# --- WebDriverAgent -------------------------------------------------------
+
+def call(method, path, body=None, timeout=60):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(WDA + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return json.load(e)
+        except Exception:
+            raise SystemExit(f"ipad-buy: WebDriverAgent answered {e.code} on {path}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise SystemExit(f"ipad-buy: WebDriverAgent does not answer on {WDA} ({e}); "
+                         "start it with: scripts/ipad wda")
+
+
+class Session:
+    def __init__(self, bundle):
+        caps = {"bundleId": bundle, "forceAppLaunch": False, "shouldTerminateApp": False,
+                "shouldWaitForQuiescence": False}
+        r = call("POST", "/session", {"capabilities": {"alwaysMatch": caps}})
+        self.sid = (r.get("value") or {}).get("sessionId") or r.get("sessionId")
+        if not self.sid:
+            raise SystemExit(f"ipad-buy: WebDriverAgent opened no session for {bundle}")
+        self.post("/appium/settings", {"settings": {"waitForIdleTimeout": 0,
+                                                    "animationCoolOffTimeout": 0}})
+
+    def post(self, path, body):
+        return call("POST", f"/session/{self.sid}{path}", body)
+
+    def get(self, path):
+        return call("GET", f"/session/{self.sid}{path}")
+
+    def close(self):
+        try:
+            call("DELETE", f"/session/{self.sid}", timeout=10)
+        except SystemExit:
+            pass
+
+    def source(self):
+        return self.get("/source?format=json").get("value") or {}
+
+    def swipe_up(self):
+        self.post("/actions", {"actions": [{
+            "type": "pointer", "id": "finger", "parameters": {"pointerType": "touch"},
+            "actions": [{"type": "pointerMove", "duration": 0, "x": 300, "y": 650},
+                        {"type": "pointerDown", "button": 0},
+                        {"type": "pointerMove", "duration": 600, "x": 300, "y": 350},
+                        {"type": "pause", "duration": 300},
+                        {"type": "pointerUp", "button": 0}]}]})
+
+    def find(self, predicate):
+        r = self.post("/elements", {"using": "predicate string", "value": predicate})
+        found = r.get("value")
+        if not isinstance(found, list):
+            return []
+        return [el.get("ELEMENT") or next(iter(el.values())) for el in found]
+
+    def rect(self, eid):
+        return self.get(f"/element/{eid}/rect").get("value") or {}
+
+
+def walk(node, parents=()):
+    """Yield (node, ancestors) for every element of a WDA JSON source tree."""
+    yield node, parents
+    for child in node.get("children") or []:
+        yield from walk(child, parents + (node,))
+
+
+def ident(n):
+    return n.get("name") or ""
+
+
+def label(n):
+    return n.get("label") or ""
+
+
+# --- The page ---------------------------------------------------------------
+
+def app_id_of(arg):
+    m = re.fullmatch(r"(?:id)?(\d{5,12})", arg.strip())
+    if m:
+        return m.group(1), None
+    u = urllib.parse.urlparse(arg.strip())
+    if u.scheme in ("https", "http", "itms-apps") and u.netloc in ("apps.apple.com", "itunes.apple.com"):
+        m = re.search(r"/id(\d{5,12})(?:$|[/?])", u.path + "/")
+        if m:
+            cc = re.match(r"/([a-z]{2})/", u.path)
+            return m.group(1), cc.group(1) if cc else None
+    die(f"not an App Store app id or URL: {arg!r} (e.g. 1234567890 or https://apps.apple.com/<cc>/app/<name>/id1234567890)")
+
+
+def device_country():
+    try:
+        out = subprocess.run(["ios", "lang"], capture_output=True, text=True, timeout=30).stdout
+        loc = json.loads(out.strip().splitlines()[-1]).get("Locale", "")
+    except Exception:
+        return None
+    m = re.search(r"_([A-Z]{2})$", loc)
+    return m.group(1).lower() if m else None
+
+
+def lookup(app_id, country):
+    """Apple's public catalogue entry for the id: name, developer, price, bundle id."""
+    q = urllib.parse.urlencode({"id": app_id, "country": country or "us"})
+    try:
+        with urllib.request.urlopen(f"https://itunes.apple.com/lookup?{q}", timeout=30) as r:
+            results = json.load(r).get("results") or []
+    except Exception as e:
+        say(f"note: Apple's lookup did not answer ({e})")
+        return None
+    return results[0] if results else None
+
+
+def offer_kind(state, text):
+    """What the main button does: price, get, open, redownload or None (unknown)."""
+    t = norm(text)
+    if state == "open" or t in OPEN_WORDS:
+        return "open" if state == "open" else None
+    if state in ("redownload", "download", "cloud") or t in REDOWNLOAD_WORDS:
+        return "redownload"
+    if state != "get":
+        return None
+    if t in GET_WORDS:
+        return "get"
+    if re.search(r"\d", t) and not SUBSCRIPTION.search(t):
+        return "price"
+    return None
+
+
+class Page:
+    def __init__(self):
+        self.title = None
+        self.offer = None          # (state, label) of the top lockup's button
+        self.offer_rect = None
+        self.notices = []          # other texts in the top lockup
+        self.developer = None
+        self.iap = None            # "yes", "no" or None (not read)
+        self.info_seen = False
+        self.info_done = False
+
+    def read_top(self, tree):
+        lockup = None
+        for n, _ in walk(tree):
+            if ident(n).startswith("AppStore.shelfItem.productTopLockup"):
+                lockup = n
+                break
+        if lockup is None:
+            return False
+        offers = []
+        for n, _ in walk(lockup):
+            i, l = ident(n), label(n)
+            if i == "AppStore.shelfItemSubComponent.title":
+                self.title = l
+            elif i.startswith("AppStore.offerButton"):
+                m = re.search(r"state=([^\],]+)", i)
+                offers.append((m.group(1) if m else "", l, n.get("rect")))
+            elif i in ("AppStore.shelfItemSubComponent.tagline", "AppStore.shelfItemSubComponent.icon"):
+                pass
+            elif i == "AppStore.shelfItemSubComponent.developer" and l:
+                self.developer = l
+            elif i == "AppStore.shelfItemSubComponent.offerButtonSubtitle" and norm(l) in IAP_WORDS:
+                self.iap = "yes"
+            elif l and n.get("type") in ("StaticText", "TextView", "Link", "Button", "Image"):
+                if (i, l) not in self.notices:
+                    self.notices.append((i, l))
+        # Buttons nest a copy of themselves; count distinct ones by label and state.
+        distinct = {(s, l) for s, l, _ in offers}
+        if len(distinct) == 1:
+            self.offer = offers[0][:2]
+            self.offer_rect = offers[0][2]
+        elif len(distinct) > 1:
+            self.offer = None
+            self.notices.append(("", "more than one offer button: " + "; ".join(sorted(l for _, l in distinct))))
+        return bool(self.title)
+
+    def read_rest(self, tree):
+        # "No in-app purchases" is read only from one screen that holds the
+        # Information header and what follows the section, so no row of it
+        # can have been between two screens.
+        header = False
+        for n, _ in walk(tree):
+            i, l = ident(n), label(n)
+            if i == "AppStore.shelfItemSubComponent.developerLink" and not self.developer:
+                self.developer = l.rsplit(",", 1)[0].strip() if "," in l else l
+            elif i.startswith("AppStore.shelf.header") and "parentId=information" in i:
+                header = self.info_seen = True
+            elif header and (i.startswith("AppStore.shelfItem.productPageLink")
+                             or i.startswith("AppStore.shelf.header")):
+                self.info_done = True
+            elif n.get("type") == "Button" and i == l and "," in l:
+                head, value = (p.strip() for p in l.split(",", 1))
+                if norm(head) in IAP_WORDS:
+                    self.iap = "yes" if norm(value) in YES_WORDS else "unreadable"
+        if self.info_done and self.iap is None:
+            self.iap = "no"
+
+
+def open_page(app_id, expect=None, wait=20):
+    """Open the app's page; wait until it shows a title and an offer (and the
+    expected name, when Apple's lookup knows it), at most `wait` seconds."""
+    s = Session(STORE)
+    try:
+        s.post("/url", {"url": f"itms-apps://apps.apple.com/app/id{app_id}"})
+        # A product page pushed on top of another one shows the old one first.
+        time.sleep(2)
+        deadline = time.time() + wait
+        while True:
+            page = Page()
+            if page.read_top(s.source()) and page.offer and (expect is None or norm(page.title) == norm(expect)):
+                break
+            if time.time() > deadline:
+                break
+            time.sleep(1)
+        return s, page
+    except BaseException:
+        s.close()
+        raise
+
+
+def read_page(app_id, expect):
+    s, page = open_page(app_id, expect)
+    try:
+        if not page.title:
+            return page
+        for _ in range(30):
+            page.read_rest(s.source())
+            if page.info_done:
+                break
+            s.swipe_up()
+            time.sleep(0.6)
+        return page
+    finally:
+        s.close()
+
+
+# --- Checks ---------------------------------------------------------------
+
+def price_text(kind, offer_label):
+    return {"price": offer_label, "get": "free", "redownload": "redownload",
+            "open": "installed"}.get(kind, "unreadable")
+
+
+def check(page, entry, args):
+    """Return the list of reasons not to tap. Empty means the page matches."""
+    reasons = []
+    if not page.title:
+        return ["the page shows no app title (no such app, no network, or not the App Store)"]
+    kind = offer_kind(*page.offer) if page.offer else None
+    if kind is None:
+        reasons.append(f"the main button is not a price, Get or re-download button: {shown(page.offer[1]) if page.offer else 'none'}")
+    elif kind == "open":
+        reasons.append("the app is installed already")
+    if page.offer and SUBSCRIPTION.search(page.offer[1]):
+        reasons.append(f"the offer reads like a subscription: {shown(page.offer[1])}")
+    for i, n in page.notices:
+        reasons.append(f"the page shows a notice next to the offer: {shown(n)} ({i or 'no identifier'})")
+    if not page.developer:
+        reasons.append("the developer could not be read")
+    if page.iap is None or page.iap == "unreadable":
+        reasons.append("whether the app has in-app purchases could not be read")
+    if entry is None:
+        reasons.append("Apple's lookup has no entry for this id in this country (try --country)")
+    else:
+        if norm(entry.get("trackName")) != norm(page.title):
+            reasons.append(f"the page title {shown(page.title)} is not the id's name {shown(entry.get('trackName'))}: "
+                           "the wrong page may be in front")
+        if kind == "price" and norm(entry.get("formattedPrice")) != norm(page.offer[1]):
+            reasons.append(f"the page price {shown(page.offer[1])} differs from Apple's lookup "
+                           f"{shown(entry.get('formattedPrice'))}")
+        if kind == "get" and entry.get("price") not in (0, 0.0):
+            reasons.append(f"the page offers Get, Apple's lookup a price of {shown(entry.get('formattedPrice'))}")
+    if args.confirm_name is not None and norm(args.confirm_name) != norm(page.title):
+        reasons.append(f"--confirm-name {shown(args.confirm_name)} is not the page's name {shown(page.title)}")
+    if args.confirm_price is not None and kind is not None:
+        if norm(args.confirm_price) != norm(price_text(kind, page.offer[1])):
+            reasons.append(f"--confirm-price {shown(args.confirm_price)} is not the page's price "
+                           f"{shown(price_text(kind, page.offer[1]))}")
+    return reasons
+
+
+def report(app_id, page, entry):
+    kind = offer_kind(*page.offer) if page.offer else None
+    say(f"app id:      {app_id}")
+    say(f"name:        {page.title or 'unreadable'}")
+    say(f"developer:   {page.developer or 'unreadable'}")
+    say(f"price:       {price_text(kind, page.offer[1]) if page.offer else 'unreadable'}"
+        + (f"   (button: {shown(page.offer[1])})" if page.offer else ""))
+    say(f"in-app purchases: {page.iap or 'unreadable'}")
+    if entry:
+        say(f"bundle id:   {entry.get('bundleId')}")
+        say(f"lookup:      {entry.get('trackName')} by {entry.get('artistName')}, {entry.get('formattedPrice')}")
+
+
+# --- Installing -------------------------------------------------------------
+
+def installed(bundle):
+    try:
+        out = subprocess.run(["ios", "apps"], capture_output=True, text=True, timeout=60).stdout
+        data = json.loads(out.strip().splitlines()[-1])
+    except Exception:
+        return None
+    apps = data if isinstance(data, list) else data.get("apps", [])
+    return any(a.get("CFBundleIdentifier") == bundle for a in apps)
+
+
+def sheet_texts(s):
+    """Texts in front that belong to a purchase or sign-in sheet, if one is up."""
+    texts = []
+    for bundle_session in (s,):
+        tree = bundle_session.source()
+        for n, parents in walk(tree):
+            if any(ident(p) == "AppStore.productPage" for p in parents):
+                continue
+            l = label(n)
+            if l and AUTH.search(l) and l not in texts:
+                texts.append(l)
+    try:
+        sb = Session("com.apple.springboard")
+        try:
+            for n, _ in walk(sb.source()):
+                l = label(n)
+                if l and AUTH.search(l) and l not in texts:
+                    texts.append(l)
+        finally:
+            sb.close()
+    except SystemExit:
+        pass
+    return texts
+
+
+def tap_offer(s, page):
+    state, text = page.offer
+    pred = f"name == {json.dumps('AppStore.offerButton[state=' + state + ']')} AND label == {json.dumps(text)}"
+    want = page.offer_rect or {}
+    for eid in s.find(pred):
+        r = s.rect(eid)
+        if all(abs(float(r.get(k, -1)) - float(want.get(k, -2))) < 1 for k in ("x", "y", "width", "height")):
+            res = s.post(f"/element/{eid}/click", {})
+            err = (res.get("value") or {}).get("error") if isinstance(res.get("value"), dict) else None
+            if err:
+                raise Refusal(f"the tap on the button failed ({err})")
+            return
+    raise Refusal("the button seen on the page could not be found again to tap it. Nothing was tapped.")
+
+
+def buy(app_id, entry, page_read, args):
+    bundle = entry["bundleId"]
+    if installed(bundle) is None:
+        raise Refusal("`ios apps` does not answer (is the go-ios tunnel up?). Nothing was tapped.")
+    s, page = open_page(app_id, page_read.title)
+    try:
+        # The page as it is now, at the top, must still be what was checked.
+        if (page.title, page.offer, page.notices) != (page_read.title, page_read.offer, page_read.notices):
+            raise Refusal(f"the page changed between reading and tapping ({shown(page.title)}, {shown(page.offer[1]) if page.offer else 'none'}). "
+                          "Nothing was tapped.")
+        tap_offer(s, page)
+        say(f"tapped {shown(page.offer[1])} once; waiting up to {args.timeout} s for {bundle}")
+        deadline = time.time() + args.timeout
+        told = None
+        while time.time() < deadline:
+            time.sleep(5)
+            # iOS lists an app while it still downloads, so the page's button
+            # has to read Open as well.
+            now = Page()
+            now.read_top(s.source())
+            if installed(bundle) and now.offer and now.offer[0] == "open":
+                say(f"installed: {page.title} ({bundle})")
+                return True
+            texts = sheet_texts(s)
+            if texts and texts != told:
+                told = texts
+                say("the App Store asks for confirmation or authentication. A person has to do this "
+                    "step on the iPad; this script does not touch the sheet. It shows:")
+                for t in texts[:8]:
+                    say(f"  {t}")
+        say(f"timed out after {args.timeout} s: {bundle} is not installed. Look at the iPad: a sheet "
+            "may still wait for the person, or the download is still running.")
+        return False
+    finally:
+        s.close()
+
+
+# --- Lock and the iPad's state ---------------------------------------------
+
+def take_lock(app_id):
+    if os.environ.get("IPAD_LOCK_HELD") == "1":
+        return False
+    try:
+        os.mkdir(LOCK)
+    except FileExistsError:
+        def read(name):
+            try:
+                with open(os.path.join(LOCK, name)) as f:
+                    return f.read().strip()
+            except OSError:
+                return "?"
+        die(f"the iPad lock is held by: {read('owner')} ({read('note')}). Run this again when it is free.")
+    with open(os.path.join(LOCK, "owner"), "w") as f:
+        f.write("scripts/ipad-buy\n")
+    with open(os.path.join(LOCK, "note"), "w") as f:
+        f.write(f"App Store page of app {app_id}, since {time.strftime('%H:%M')}\n")
+    return True
+
+
+def aum_to_front():
+    try:
+        Session(AUM).close()
+        say("AUM is in front: it keeps the iPad awake")
+    except SystemExit:
+        say("AUM could not be brought to the front. Do that soon (scripts/ipad launch aum), "
+            "or the iPad locks itself.")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="ipad-buy", add_help=False)
+    p.add_argument("app")
+    p.add_argument("--confirm-name")
+    p.add_argument("--confirm-price")
+    p.add_argument("--timeout", type=int, default=600)
+    p.add_argument("--country")
+    p.add_argument("-h", "--help", action="store_true")
+    if any(a in ("-h", "--help") for a in sys.argv[1:]) or len(sys.argv) < 2:
+        with open(__file__) as f:
+            lines = f.read().splitlines()[1:]
+        for line in lines:
+            if not line.startswith("#"):
+                break
+            print(line[2:] if line.startswith("# ") else line[1:])
+        return 0
+    args = p.parse_args()
+    if (args.confirm_name is None) != (args.confirm_price is None):
+        die("a purchase needs both --confirm-name and --confirm-price; without either the script only looks")
+    for v in (args.confirm_name, args.confirm_price):
+        if v is not None and not v.strip():
+            die("an empty confirmation is no confirmation")
+    if args.timeout < 1:
+        die("--timeout takes a number of seconds")
+    if shutil.which("ios") is None:
+        die("'ios' (go-ios) not found on PATH")
+
+    app_id, url_cc = app_id_of(args.app)
+    buying = args.confirm_price is not None
+    locked = call("GET", "/wda/locked", timeout=10).get("value")
+    if locked is not False:
+        die("the iPad is locked (or WebDriverAgent cannot tell); unlock it first: scripts/ipad unlock")
+
+    held = take_lock(app_id)
+    try:
+        country = (args.country or url_cc or device_country() or "us").lower()
+        entry = lookup(app_id, country)
+        page = read_page(app_id, entry.get("trackName") if entry else None)
+        report(app_id, page, entry)
+        reasons = check(page, entry, args)
+        if not buying:
+            if reasons:
+                say("a purchase would be refused:")
+                for r in reasons:
+                    say(f"  - {r}")
+            else:
+                kind = offer_kind(*page.offer)
+                say("to buy it, after the person who pays has confirmed this app and this price:")
+                price = " ".join(unicodedata.normalize("NFKC", price_text(kind, page.offer[1])).split())
+                say(f"  scripts/ipad buy {app_id} --confirm-name {shlex.quote(page.title)} "
+                    f"--confirm-price {shlex.quote(price)}")
+            say("looked only: nothing was bought or downloaded")
+            return 0
+        if reasons:
+            say("refused, nothing was tapped:")
+            for r in reasons:
+                say(f"  - {r}")
+            return 1
+        ok = buy(app_id, entry, page, args)
+        return 0 if ok else 1
+    except Refusal as e:
+        say(f"refused: {e}")
+        return 1
+    finally:
+        aum_to_front()
+        if held:
+            shutil.rmtree(LOCK, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

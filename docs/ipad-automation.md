@@ -18,7 +18,7 @@ scripts/ipad tap "LAST STATE" aum        # AUM loads its last session
 | You want | Needs |
 |---|---|
 | launch an app, screenshot, list apps/processes | the go-ios tunnel |
-| tap, press, swipe, or read the UI (`tap`, `tap-at`, `hold`, `swipe`, `size`, `tree`) | the tunnel **+** a mounted developer disk image **+** WebDriverAgent installed and running **+** UI Automation enabled, iPad unlocked |
+| tap, press, swipe, or read the UI (`tap`, `tap-at`, `hold`, `swipe`, `size`, `tree`, `unlock`, `buy`) | the tunnel **+** a mounted developer disk image **+** WebDriverAgent installed and running **+** UI Automation enabled, iPad unlocked |
 
 Launching and screenshots work without a disk image. Only UI automation needs the
 whole stack.
@@ -194,6 +194,66 @@ read from the terminal only: an agent asks a person to run the script and never
 types, stores or passes the code itself. The script takes the lock directory
 `~/.cache/go-ios/ipad.lock` for as long as it runs and refuses while something
 else holds it (`IPAD_LOCK` overrides the path).
+
+### Getting an app from the App Store
+
+`scripts/ipad buy` opens an app's page in the App Store on the iPad and reads it;
+with the person's confirmation it buys or downloads that one app:
+
+```bash
+scripts/ipad buy 1234567890                  # or https://apps.apple.com/<cc>/app/<name>/id1234567890
+#   name:        Example Synth
+#   developer:   Example Audio
+#   price:       9,99 €   (button: "9,99 €")
+#   in-app purchases: no
+#   bundle id:   com.example.synth
+#   ...
+#   looked only: nothing was bought or downloaded
+scripts/ipad buy 1234567890 --confirm-name "Example Synth" --confirm-price "9,99 €"
+```
+
+Looking is the default: without both confirmations it taps nothing that buys or
+downloads. It prints the app's name, developer and price, whether the page lists
+in-app purchases, the bundle id, and either the exact buy command or the reasons a
+purchase would be refused. `--confirm-price` takes the price as the look prints it,
+`free` for a free app, or `redownload` for an app bought before (the cloud button).
+
+**The confirmation is the person's, not the agent's.** An agent passes
+`--confirm-name` and `--confirm-price` only after the person who pays has
+confirmed that app and that total in their own words, for this purchase. An
+earlier approval does not carry over to another app or another price.
+
+With the confirmations the script
+
+1. refuses, without tapping, when the name or the price differs from the page, when
+   the page title is not the name Apple's public lookup gives for the id, when the
+   page price differs from the lookup's, on a subscription or any offer it does not
+   know (a trial, Arcade, a second offer button), on a notice next to the offer
+   ("not compatible with this device"), and on anything it cannot read (developer,
+   in-app purchases);
+2. reopens the page, checks that it still shows the same, and taps the price, Get
+   or re-download button of that app once, found by its identifier and position
+   (never another app's button from the "you might also like" shelves);
+3. waits (`--timeout`, default 600 s) until `ios apps` lists the bundle id and the
+   page's button reads Open, and reports.
+
+**No credential passes through the script.** It takes no Apple ID password,
+payment detail or other secret from an argument, the environment, a file or a log,
+and no session types one. When the App Store asks for authentication (a password,
+Face ID or Touch ID, a double-click of the top button, a sign-in), the script
+leaves the sheet as it is, prints what it shows, says that a person has to do this
+step on the iPad, and only waits. It never buys in-app purchases or subscriptions,
+and it changes no account, payment, password or App Store setting.
+
+It needs WebDriverAgent and the tunnel, and an unlocked iPad. It takes the lock
+directory `~/.cache/go-ios/ipad.lock` like `unlock` does; a caller that holds the
+lock already sets `IPAD_LOCK_HELD=1`. The country for the lookup comes from the URL,
+else the iPad's region; `--country <cc>` overrides it. Afterwards it brings AUM to
+the front. The page is read from the accessibility tree: the top lockup's
+`AppStore.shelfItemSubComponent.title`, `AppStore.offerButton[state=…]` and its
+subtitle (In-App Purchases), and the Information section's in-app purchases row,
+which the script scrolls to. Button words are matched for English and German, and for French, Spanish
+and Italian for the common buttons; where a word is not known it refuses rather than guesses.
 
 ## App notes
 
