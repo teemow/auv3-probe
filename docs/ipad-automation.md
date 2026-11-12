@@ -195,6 +195,33 @@ types, stores or passes the code itself. The script takes the lock directory
 `~/.cache/go-ios/ipad.lock` for as long as it runs and refuses while something
 else holds it (`IPAD_LOCK` overrides the path).
 
+### A passcode prompt inside an app
+
+Some screens of an unlocked iPad ask for the passcode before they open, such as
+Settings > Face ID & Code. With that prompt in front, someone who knows the code
+runs:
+
+```bash
+scripts/ipad passcode --dry-run   # find the prompt and its keys; types nothing
+scripts/ipad passcode             # asks for the code (not shown), types it into the prompt
+```
+
+[`scripts/ipad-passcode`](../scripts/ipad-passcode) follows the same rules as
+`unlock`. It reads the code from its own terminal prompt only, makes **one**
+attempt, types nothing unless the prompt is empty, the code has the prompt's
+length and every key it needs is on screen once (an app's keypad is buttons, and
+each button nests a copy of itself), and stops when a tap does not register. It
+reports whether the prompt closed (accepted) or stayed (refused, no retry). It
+changes no setting itself: whatever comes after the prompt is a separate step.
+It refuses on a locked iPad, which is `unlock`'s job. A caller that holds the iPad
+lock and opened the prompt sets `IPAD_LOCK_HELD=1`.
+
+When the person is not at the desk's own terminal, an agent can start the
+command in a terminal multiplexer session on the host (for example
+`tmux new-session -d -s ipad 'IPAD_LOCK_HELD=1 scripts/ipad passcode'`). The person
+attaches (`tmux attach -t ipad`), types the code and detaches. The agent reads
+only the script's output, never the keystrokes.
+
 ### Getting an app from the App Store
 
 `scripts/ipad buy` opens an app's page in the App Store on the iPad and reads it;

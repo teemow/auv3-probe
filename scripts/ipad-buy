@@ -91,7 +91,7 @@ SUBSCRIPTION = re.compile(r"abo|subscri|arcade|trial|testen|monat|month|jahr|yea
                           re.IGNORECASE)
 # Texts of the purchase and authentication sheets, read from the accessibility
 # tree after the tap. The sheet's own confirm button:
-CONFIRM_WORDS = {"kaufen", "buy", "purchase", "installieren", "install", "acheter", "comprar",
+CONFIRM_WORDS = {"kaufen", "kauf", "buy", "purchase", "installieren", "install", "acheter", "comprar",
                  "acquista", "installer", "instalar", "installa"}
 # Apple's double-press of the top button ("Mit Taste bestätigen", banner "Zum
 # Zahlen zweimal drücken"; "Confirm with Side Button", "Double-click to pay").
@@ -508,9 +508,12 @@ class Screen:
                                 " AND NOT (type == 'XCUIElementTypeSearchField')"
                                 " AND NOT (name CONTAINS[c] 'search' OR name CONTAINS[c] 'such'"
                                 " OR placeholderValue CONTAINS[c] 'search' OR placeholderValue CONTAINS[c] 'such')")
-                words = ", ".join(json.dumps(w) for w in sorted(CONFIRM_WORDS))
+                # WebDriverAgent matches nothing with `label IN[c] {...}`:
+                # one comparison per word. On iPadOS 27 the sheet is
+                # SpringBoard's, its button `pay-now` labelled "Kauf".
+                words = " OR ".join(f"label ==[c] {json.dumps(w)}" for w in sorted(CONFIRM_WORDS))
                 confirm = s.find("type == 'XCUIElementTypeButton' AND NOT (name BEGINSWITH 'AppStore.')"
-                                 f" AND label IN[c] {{{words}}}")
+                                 f" AND ({words})")
                 if (secure or fields or confirm) and self.where is None:
                     self.where, self.secure, self.fields, self.confirm = bundle, secure, fields, confirm
         finally:
@@ -556,19 +559,30 @@ TODO = {
                "account names.",
     "password-iPad": "ON THE IPAD: type the Apple ID password into the sheet (this run has no "
                      "terminal to ask at).",
+    "password-left": "ON THE IPAD: type the Apple ID password into the sheet (the prompt here "
+                     "was left empty twice).",
 }
 
 
 def ask_password():
-    """The Apple ID password from the person at this terminal, or None."""
+    """The Apple ID password from the person at this terminal; "" when they
+    leave it to the iPad, None without a terminal. An empty answer is asked
+    once more: a terminal multiplexer can send a stray Return on attach."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     import getpass
+    prompts = ("The sheet asks for the Apple ID password. Type it here (not shown; "
+               "Return alone to type it on the iPad instead): ",
+               "That was empty. Type the password (not shown), or Return alone again to "
+               "type it on the iPad: ")
     try:
-        return getpass.getpass("The sheet asks for the Apple ID password. Type it here (not shown; "
-                               "Return alone to type it on the iPad instead): ")
+        for prompt in prompts:
+            pw = getpass.getpass(prompt)
+            if pw:
+                return pw
     except (EOFError, KeyboardInterrupt):
-        return ""
+        pass
+    return ""
 
 
 def enter_password(s, screen, pw):
@@ -720,7 +734,7 @@ def follow(s, page, bundle, args, start):
                     typed = True
                     say(f"{stamp(start)} password entered once; waiting for the App Store")
                 else:
-                    say(f"{stamp(start)} {TODO['password-iPad']}")
+                    say(f"{stamp(start)} {TODO['password-iPad' if pw is None else 'password-left']}")
             last_state = state
             continue
         if state == "confirm" and not confirmed:

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# ipad-passcode: enter the iPad's passcode into a passcode prompt an app shows
+# while the iPad is unlocked (Settings > Face ID & Code asks for it before it
+# opens), through WebDriverAgent, for when nobody is at the iPad. Also run as
+# `scripts/ipad passcode`. The lock screen is ipad-unlock's job.
+#
+# The same rules as ipad-unlock: a person runs this in a terminal and types the
+# code when asked. It is not echoed, not written to a file and not put on a
+# command line, and an agent never types or stores it. ONE attempt, never
+# repeated: iPadOS counts wrong codes. It taps nothing unless the prompt is in
+# front and empty, the code has the length the prompt asks for and every key
+# the code needs is on screen exactly once, and it stops when a tap does not
+# register (an unfinished code is not an attempt). Numeric codes only. It
+# changes no setting: what to do behind the prompt is the caller's step.
+#
+#   ipad-passcode            ask for the code, type it into the prompt in front
+#   ipad-passcode --dry-run  find the prompt and its keys; type nothing
+#
+# Needs WebDriverAgent running (`scripts/ipad wda`), curl and jq. It takes the
+# directory lock $IPAD_LOCK (default ~/.cache/go-ios/ipad.lock) and refuses
+# while another holder has it; a caller that already holds the lock (and opened
+# the prompt) sets IPAD_LOCK_HELD=1. Overrides: IPAD_WDA_URL or WDA_PORT,
+# GOIOS_CACHE, IPAD_LOCK.
+set -u
+W=${IPAD_WDA_URL:-http://127.0.0.1:${WDA_PORT:-8100}}
+LOCK=${IPAD_LOCK:-${GOIOS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/go-ios}/ipad.lock}
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+say() { printf '%s\n' "$*"; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+for bin in curl jq; do command -v "$bin" >/dev/null || die "$bin is needed"; done
+
+get() { curl -s --max-time "${2:-15}" "$W$1"; }
+post() { curl -s --max-time "${3:-20}" -X POST -H 'Content-Type: application/json' -d "$2" "$W$1"; }
+locked() { get /wda/locked 8 | jq -r 'if (.value | type) == "boolean" then .value else empty end' 2>/dev/null; }
+session_id() { jq -r '(.value.sessionId? // .sessionId? // empty)' 2>/dev/null; }
+
+state=$(locked)
+[ -n "$state" ] || die "WebDriverAgent does not answer on $W"
+[ "$state" = false ] || die "the iPad is locked: that prompt is for scripts/ipad unlock. Nothing was typed."
+
+SID=""
+CODE=""
+HELD=0
+cleanup() {
+	CODE=""
+	[ -n "$SID" ] && curl -s --max-time 10 -X DELETE "$W/session/$SID" >/dev/null
+	[ "$HELD" = 1 ] && rm -rf "$LOCK"
+}
+trap cleanup EXIT
+
+if [ "${IPAD_LOCK_HELD:-}" != 1 ]; then
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		die "the iPad lock is held by: $(cat "$LOCK/owner" 2>/dev/null) ($(cat "$LOCK/note" 2>/dev/null)). Run this again when it is free."
+	fi
+	HELD=1
+	printf '%s\n' "scripts/ipad-passcode, run by hand" >"$LOCK/owner"
+	printf '%s\n' "entering the passcode into a prompt in front, since $(date +%H:%M)" >"$LOCK/note"
+fi
+
+# A session without an app reads whatever is in front.
+SID=$(post /session '{"capabilities":{"alwaysMatch":{"shouldWaitForQuiescence":false}}}' 30 | session_id)
+[ -n "$SID" ] || die "WebDriverAgent opened no session. Nothing was typed."
+post "/session/$SID/appium/settings" '{"settings":{"waitForIdleTimeout":0,"animationCoolOffTimeout":0}}' >/dev/null
+
+# find_ids PREDICATE: the ids of the elements it matches, one a line.
+find_ids() {
+	post "/session/$SID/elements" "$(jq -n --arg p "$1" '{using: "predicate string", value: $p}')" |
+		jq -r 'if (.value | type) == "array" then .value[] | (.ELEMENT // .["element-6066-11e4-a52e-4f735466cecf"]) else empty end' 2>/dev/null
+}
+rect() { get "/session/$SID/element/$1/rect" | jq -c '.value | [.x, .y, .width, .height]' 2>/dev/null; }
+
+# The prompt's field says, in the iPad's language, how many digits are in and
+# how many the code takes ("0 of 6 values entered"). Settings shows that on a
+# "Passcode field" element around the secure field.
+FIELD=$(find_ids "name == 'Passcode field'" | head -1)
+[ -n "$FIELD" ] || FIELD=$(find_ids "type == 'XCUIElementTypeSecureTextField'" | head -1)
+[ -n "$FIELD" ] || die "no passcode prompt is in front. Nothing was typed."
+field() { get "/session/$SID/element/$FIELD/attribute/value" | jq -r '.value // empty' 2>/dev/null; }
+entered() { field | sed -nE 's/^([0-9]+)[^0-9]+([0-9]+).*/\1/p'; }
+wanted() { field | sed -nE 's/^([0-9]+)[^0-9]+([0-9]+).*/\2/p'; }
+
+N=$(wanted)
+E=$(entered)
+[ -n "$N" ] || die "the prompt does not say how many digits it takes (\"$(field)\"). Nothing was typed."
+[ "$E" = 0 ] || die "the prompt already holds $E digit(s). Nothing was typed: cancel the prompt and open it again."
+
+if [ "$DRY" = 0 ]; then
+	[ -t 0 ] || die "run this in a terminal: the code is asked for there"
+	read -rs -p "iPad passcode for the prompt in front (not shown): " CODE
+	echo
+	# A terminal multiplexer can send a stray Return on attach: ask once more.
+	if [ -z "$CODE" ]; then
+		read -rs -p "That was empty. iPad passcode (not shown): " CODE
+		echo
+	fi
+	case "$CODE" in
+	'' | *[!0-9]*) die "the code must be digits only. Nothing was typed on the iPad." ;;
+	esac
+	[ "${#CODE}" = "$N" ] || die "the prompt takes $N digits, the code given has ${#CODE}. Nothing was typed."
+	need=$(printf '%s' "$CODE" | grep -o . | sort -u | tr '\n' ' ')
+else
+	need="0 1 2 3 4 5 6 7 8 9"
+fi
+
+# An app's keypad is buttons, the keyboard's is keys. A button nests a copy of
+# itself at the same place: one key means one place on screen.
+declare -A KEY
+for d in $need; do
+	ids=$(find_ids "(type == 'XCUIElementTypeKey' OR type == 'XCUIElementTypeButton') AND label == '$d'")
+	places=$(for id in $ids; do rect "$id"; done | sort -u | grep -c .)
+	if [ "$places" != 1 ]; then
+		[ "$DRY" = 1 ] && die "the key $d is not on screen exactly once"
+		die "a key the code needs is not on screen exactly once. Nothing was typed."
+	fi
+	KEY[$d]=$(printf '%s\n' "$ids" | head -1)
+done
+
+if [ "$DRY" = 1 ]; then
+	say "a passcode prompt is in front and empty, it takes $N digits, and all ten keys were found. Nothing was typed."
+	exit 0
+fi
+
+i=0
+while [ "$i" -lt "${#CODE}" ]; do
+	d=${CODE:$i:1}
+	i=$((i + 1))
+	err=$(post "/session/$SID/element/${KEY[$d]}/click" '{}' | jq -r '.value.error? // empty' 2>/dev/null)
+	[ -z "$err" ] || die "tap $i failed ($err): stopped with the code unfinished, which is not an attempt."
+	if [ "$i" -lt "$N" ]; then
+		got=""
+		for _ in 1 2 3 4 5 6; do
+			got=$(entered)
+			[ "$got" = "$i" ] && break
+			sleep 0.2
+		done
+		[ "$got" = "$i" ] || die "after $i tap(s) the prompt holds ${got:-an unknown number of} digit(s): stopped with the code unfinished, which is not an attempt."
+	fi
+done
+CODE=""
+
+# Accepted: the prompt goes away. Refused: it stays, emptied.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+	sleep 0.5
+	[ -z "$(find_ids "name == 'Passcode field' OR type == 'XCUIElementTypeSecureTextField'" | head -1)" ] && {
+		say "the code was accepted: the prompt has closed"
+		exit 0
+	}
+done
+die "the prompt is still there: the code was not accepted. This script does not try again, because iPadOS counts wrong codes. Check the code before another run."
