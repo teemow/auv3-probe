@@ -275,6 +275,19 @@ and waits; Apple closes the sheet after about a minute, and the script then repo
 that nothing was bought. An agent running the command tells the person to be at the
 iPad first.
 
+AssistiveTouch does not change that. Tried on iPadOS 27 with AssistiveTouch on
+(Settings > Accessibility > Touch > AssistiveTouch): WebDriverAgent can tap its
+floating button and open its menu, but neither the menu (with the sheet open: the
+top level, Device and Device > More) nor the list of custom actions offers a
+double-click, and the sheet kept "Zum Zahlen zweimal drücken" until it closed
+unpaid. The menu is not in any accessibility tree either. So a purchase that asks
+for the double-press cannot be finished remotely; leave AssistiveTouch off.
+
+While the sheet is open the app's button already reads "Download vorbereiten"
+(state `loading`). That says nothing about payment: the script reports a purchase
+only on a later state or when the sheet closes and the button does not read the
+price again.
+
 **The password comes only from a person at the script's own prompt**, as the
 passcode does for `unlock`. It is not echoed, stored or logged, and never taken
 from an argument, the environment, a file or a pipe; without a terminal the script

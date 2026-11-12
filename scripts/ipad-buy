@@ -26,7 +26,9 @@
 # An earlier approval does not carry over to another app or another price.
 #
 # Only a person at the iPad can press the top button twice, use Face ID or
-# Touch ID, or type a verification code: the script says so and waits for it
+# Touch ID, or type a verification code (AssistiveTouch does not stand in for
+# the double-press: its menu has no double-click action for the purchase
+# sheet, tried on iPadOS 27): the script says so and waits for it
 # (Apple closes the sheet after about a minute; the script then reports that
 # nothing was bought). When the sheet asks for the Apple ID password, and only
 # then, the script asks for it at its own terminal prompt (not shown), like
@@ -96,6 +98,9 @@ CONFIRM_WORDS = {"kaufen", "buy", "purchase", "installieren", "install", "achete
 DOUBLE_PRESS = re.compile(r"zweimal|doppel|double.?(click|press)|twice|mit taste bestätigen|"
                           r"confirm with (the )?(side|top) button|seitentaste|obere taste|"
                           r"side button|top button|deux fois|dos veces|due volte", re.IGNORECASE)
+# Offer button states the App Store shows while its sheet is still open; they
+# say nothing about whether the purchase went through.
+PENDING_STATES = {"loading"}
 BIOMETRIC = re.compile(r"face id|touch id", re.IGNORECASE)
 CODE = re.compile(r"code", re.IGNORECASE)
 SIGN_IN = re.compile(r"\banmelden\b|\bsign in\b|\bse connecter\b|iniciar sesión|accedi", re.IGNORECASE)
@@ -541,8 +546,9 @@ class Screen:
 # What the person has to do, in plain words, for each state of the sheet.
 TODO = {
     "double-press": "ON THE IPAD: press the top button (the power button) twice, quickly, to pay. "
-                    "Apple lets only a person at the iPad do this; nothing from this desk can. The "
-                    "sheet waits about a minute, then closes without buying.",
+                    "Apple lets only a person at the iPad do this; nothing from this desk can (taps "
+                    "do not, and AssistiveTouch's menu has no double-click for it). The sheet waits "
+                    "about a minute, then closes without buying.",
     "biometric": "ON THE IPAD: confirm with Face ID or Touch ID. Only a person at the iPad can do this.",
     "code": "ON THE IPAD: type the verification code Apple sent into the sheet. This script does "
             "not type codes.",
@@ -669,9 +675,15 @@ def follow(s, page, bundle, args, start):
             say(f"{stamp(start)} installed: {page.title} ({bundle})")
             return True
         if top.offer and top.offer != last_offer:
+            # The App Store sets the button to "loading" ("Download
+            # vorbereiten") as soon as its sheet opens, before anything is
+            # paid: only a later state, or the sheet closing on a changed
+            # button (below), says the purchase went through.
+            progressed = top.offer != page.offer and top.offer[0] not in PENDING_STATES
             say(f"{stamp(start)} the app's button now reads {shown(top.offer[1])} (state {top.offer[0]})"
-                + ("; the purchase went through, downloading" if top.offer != page.offer else ""))
-            if top.offer != page.offer:
+                + ("; the purchase went through, downloading" if progressed else
+                   "; the App Store waits for the purchase sheet" if top.offer[0] in PENDING_STATES else ""))
+            if progressed:
                 seen_sheet = confirmed = True
             last_offer = top.offer
         screen = Screen(s)

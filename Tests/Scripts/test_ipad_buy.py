@@ -81,3 +81,35 @@ class PurchaseProgressTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_loading_button_while_sheet_waits_is_no_purchase(self):
+        # As seen live: the button reads "Download vorbereiten" (state loading)
+        # as soon as the sheet opens; the sheet then runs out unconfirmed.
+        loading = ("loading", "Download vorbereiten")
+        with patch.object(buy, "ipad_locked", return_value=False), \
+                patch.object(buy, "installed", return_value=False), \
+                patch.object(buy, "Page", side_effect=[
+                    self.top(loading), self.top(loading),
+                    self.top(self.page.offer), self.top(self.page.offer)]), \
+                patch.object(buy, "Screen", side_effect=[
+                    self.screen("double-press"), self.screen("double-press"),
+                    self.screen(None), self.screen(None)]):
+            self.assertFalse(self.follow())
+        self.assertFalse(any("went through" in line for line in self.messages))
+        self.assertTrue(any("waits for the purchase sheet" in line for line in self.messages))
+        self.assertTrue(any("nothing was bought" in line for line in self.messages))
+
+    def test_loading_button_does_not_skip_the_sheets_confirm_tap(self):
+        loading = ("loading", "Download vorbereiten")
+        sheet = SimpleNamespace(texts=["App kaufen", "Example Synth", "7,99 €"],
+                                state=lambda: "confirm", confirm=["e1"],
+                                shows=lambda text: True, where=buy.STORE)
+        self.session.post.return_value = {"value": None}
+        with patch.object(buy, "ipad_locked", return_value=False), \
+                patch.object(buy, "installed", side_effect=[False, True]), \
+                patch.object(buy, "Page", side_effect=[
+                    self.top(loading), self.top(("open", "Öffnen"))]), \
+                patch.object(buy, "Screen", side_effect=[sheet]):
+            self.assertTrue(self.follow())
+        self.assertTrue(any("confirmed the purchase sheet once" in line for line in self.messages))
+        self.session.post.assert_any_call("/element/e1/click", {})
