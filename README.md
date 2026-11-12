@@ -183,8 +183,9 @@ position from Linux, use [`scripts/ipad`](scripts/ipad); see
    reachable the app **auto-syncs**: it reads every installed unit and POSTs
    each record to `/auv3-probe`, then POSTs a scan report. The audio-units tab
    is a status console showing each unit's live sync state; tap a unit to
-   inspect what was measured. **resync** (top-right) re-scans for newly
-   installed plugins and pushes again.
+   inspect what was measured. The app remembers what it sent to which daemon:
+   a later start sends only new and updated units. **resync** (top-right)
+   re-scans for newly installed plugins and sends everything again.
 
 ## Reading AUM sessions
 
@@ -233,6 +234,12 @@ standalone command seeds a synthetic `template.aumproj` into its staging dir on
 first run, so the list has something to test with before you upload anything.
 
 The ferry is purely additive — listing and inspecting always work offline.
+
+With a folder linked the two sides are kept identical by an automatic sync
+([docs/aum-sessions-tab.md](docs/aum-sessions-tab.md)). After every sync cycle
+the app tells mcp-midi-controller which files are in conflict, failed or still
+being copied (`POST /aum-session/sync`,
+[docs/aum-sync-report.md](docs/aum-sync-report.md)).
 
 > **Privacy.** Session files carry installation-specific data (song/channel
 > names). They are parsed and shown on-device; when the ferry is used they travel

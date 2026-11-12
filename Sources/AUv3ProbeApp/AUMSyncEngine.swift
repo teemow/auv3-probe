@@ -8,15 +8,18 @@ import ProbeKit
 // ferry and the old once-per-host push-only autoSync.
 //
 // Model: an index-based mirror. The engine persists a sync index
-// (relative path → device mtime/size + controller modified/size at the last
+// (relative path → both sides' fingerprints and the bytes' hash at the last
 // successful sync). Each cycle it enumerates the device folder, fetches the
 // controller manifest (cheaply: GET /aum-session?rev=<last seen> answers 304
-// when the staging dir is unchanged), and diffs both sides against the index:
+// when the staging dir is unchanged), and diffs both sides against the index
+// (AUMSyncDiff in ProbeKit, which has the rules and their tests):
 //   - present on one side only            → copy to the other
 //   - one side changed since last sync    → copy to the other (newest wins)
 //   - BOTH sides changed                  → conflict badge, no silent overwrite
 //   - deletions do NOT propagate in v1    → the surviving copy is restored
 // Files move as verbatim bytes in both directions; the engine never re-encodes.
+// After every cycle it tells the controller what it made of each file
+// (docs/aum-sync-report.md).
 //
 // Constraints baked in:
 //   - The controller's upload route only accepts .aumproj (it validates the
@@ -24,29 +27,13 @@ import ProbeKit
 //     flow controller → device, device-only midimaps simply stay device-only.
 //   - Sync runs only while the app is foregrounded (iOS); the UI states this
 //     plainly via `lastSynced` instead of pretending otherwise.
+//   - The engine never takes its own writes for changes: a file's date alone
+//     does not make it changed (the bytes do), and a cycle looks at a file
+//     again right before it copies, because its listing is as old as the cycle.
 //
 // Privacy: relative paths and filenames are private rig data — kept in
-// UserDefaults and shown in-UI, never logged or committed.
-
-/// Per-file sync state, shown as a row badge in the browser. `synced` is the
-/// subtle default; everything else demands attention.
-enum AUMFileSyncState: Equatable {
-    case synced
-    case pushing                 // device → controller copy in flight
-    case pulling                 // controller → device copy in flight
-    case conflict                // both sides changed; user picks a side
-    case error(String)
-
-    var isWorking: Bool { self == .pushing || self == .pulling }
-}
-
-/// What one sync cycle decided to do with a file (resolved from the index diff).
-private enum SyncAction {
-    case push(AUMFolderFile)
-    case pull(AUMSessionEntry, updatesExisting: Bool)
-    case conflict
-    case none
-}
+// UserDefaults, shown in-UI and reported to the controller the files are synced
+// with, never logged or committed.
 
 /// One file that arrived or changed from the controller since the user last
 /// looked — the "inbox" strip at the top of the browser root.
@@ -59,18 +46,6 @@ struct AUMInboxItem: Identifiable, Codable, Equatable {
 
     var id: String { path }
     var filename: String { (path as NSString).lastPathComponent }
-}
-
-/// One side's fingerprint of a file at the last successful sync. The diff
-/// compares current fingerprints against these to decide who changed.
-private struct AUMSyncIndexEntry: Codable, Equatable {
-    /// Device mtime (seconds since 1970) and size at last sync.
-    var deviceModified: Double?
-    var deviceBytes: Int
-    /// Controller `modified` (RFC3339, verbatim from the manifest) and size
-    /// at last sync. Compared as strings — only equality matters.
-    var controllerModified: String
-    var controllerBytes: Int
 }
 
 /// The header's one-line summary of where the library stands.
@@ -86,6 +61,8 @@ enum AUMSyncStatus: Equatable {
 final class AUMSyncEngine: ObservableObject {
     private static let indexKey = "aumSyncIndexV1"
     private static let inboxKey = "aumSyncInboxV1"
+    /// How long a cycle copies by one plan before it makes a new one.
+    private static let planLifetime: TimeInterval = 120
 
     /// Relative path → live sync state. Paths absent from the map are synced.
     @Published private(set) var states: [String: AUMFileSyncState] = [:]
@@ -95,6 +72,8 @@ final class AUMSyncEngine: ObservableObject {
     /// Files that arrived/changed from the controller since last viewed.
     @Published private(set) var inbox: [AUMInboxItem] = []
     @Published private(set) var status: AUMSyncStatus = .idle
+    /// True while a cycle runs or a conflict is being resolved. The two never
+    /// overlap: both change the index and copy files.
     @Published private(set) var isSyncing = false
     /// Count of files currently staged on the controller (footer card).
     @Published private(set) var stagedCount: Int?
@@ -103,15 +82,35 @@ final class AUMSyncEngine: ObservableObject {
     /// (browse/share staged files when no AUM folder is linked yet).
     @Published private(set) var controllerEntries: [AUMSessionEntry] = []
 
+    /// The audio units tab's progress, for the report to the controller. Set
+    /// by the view that owns both.
+    var audioUnitProgress: () -> AUMSyncReport.AudioUnits? = { nil }
+
     /// The persisted index (relative path → both-side fingerprints).
     private var index: [String: AUMSyncIndexEntry]
     /// The last fetched manifest (staging rev + entries). In-memory only: the
     /// rev is just a poll short-circuit and a 304 means "reuse these entries",
     /// so the two only make sense together — and a fresh launch fetches once.
     private var lastManifest: AUMManifestSnapshot?
+    /// Set by an upload: the next cycle fetches the manifest whole instead of
+    /// asking by rev, so it sees how the controller lists what it was sent.
+    private var manifestIsStale = false
     /// Coalesces triggers: a kick during a running cycle queues one re-run
     /// with the freshest client/folder (the host may have changed mid-cycle).
     private var pendingKick: (client: DaemonClient?, folder: AUMFolderBookmark)?
+    /// Conflict resolutions waiting for the running cycle to end.
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    /// Uploads the controller refused (HTTP 4xx), with the file's stamp then.
+    /// The same file is not sent again in every cycle. In memory only: a start
+    /// tries once more.
+    private var refused: [String: (bytes: Int, modified: Double?, text: String)] = [:]
+    /// The daemon that has no route for the report (one from before it).
+    private var reportRefusedBy: URL?
+    /// Why the last listing of the AUM folder failed, nil when it did not.
+    private var folderProblem: String?
+    /// Bumped by `reset()`. A cycle that was waiting on the network when the
+    /// folder was relinked must not copy into the new one.
+    private var generation = 0
 
     init() {
         let defaults = UserDefaults.standard
@@ -145,8 +144,11 @@ final class AUMSyncEngine: ObservableObject {
     /// linked folder changes — fingerprints from the old folder must not be
     /// diffed against the new one.
     func reset() {
+        generation += 1
         index = [:]
         lastManifest = nil
+        manifestIsStale = false
+        refused = [:]
         states = [:]
         inbox = []
         stagedCount = nil
@@ -162,16 +164,29 @@ final class AUMSyncEngine: ObservableObject {
             return
         }
         isSyncing = true
-        defer {
-            isSyncing = false
-            if let next = pendingKick {
-                pendingKick = nil
-                kick(client: next.client, folder: next.folder)
-            }
+        defer { finish() }
+        await cycle(client: client, folder: folder)
+    }
+
+    /// End a cycle or a conflict's resolution. A resolution that waited goes
+    /// first; a queued kick runs once nothing waits.
+    private func finish() {
+        isSyncing = false
+        if !waiting.isEmpty {
+            let resumed = waiting
+            waiting = []
+            resumed.forEach { $0.resume() }
+        } else if let next = pendingKick {
+            pendingKick = nil
+            kick(client: next.client, folder: next.folder)
         }
+    }
+
+    private func cycle(client: DaemonClient?, folder: AUMFolderBookmark) async {
+        let generation = self.generation
 
         // Device side first: the browser renders this even fully offline.
-        refreshDeviceFiles(folder)
+        let listed = refreshDeviceFiles(folder)
 
         guard let client = client else {
             status = folder.isBound ? .offline : .idle
@@ -183,183 +198,283 @@ final class AUMSyncEngine: ObservableObject {
         // only send a rev when we hold one).
         let entries: [AUMSessionEntry]
         do {
-            if let snapshot = try await client.fetchAUMManifest(ifChangedFrom: lastManifest?.rev) {
+            let known = manifestIsStale ? nil : lastManifest?.rev
+            if let snapshot = try await client.fetchAUMManifest(ifChangedFrom: known) {
                 lastManifest = snapshot
+                manifestIsStale = false
             }
             entries = lastManifest?.entries ?? []
         } catch {
             status = .offline
             return
         }
+        guard generation == self.generation else { return }
         stagedCount = entries.count
         controllerEntries = entries
-        persist()
 
         // No folder linked: nothing to mirror against — the staged listing
         // above is all the fallback UI needs.
         guard folder.isBound else {
             status = .idle
+            await report(to: client, error: AUMFolderError.noFolder.localizedDescription)
+            return
+        }
+        // A folder that could not be listed is not an empty one: diffing
+        // against nothing would fetch every controller file over the device's.
+        guard listed else {
+            let why = folderProblem ?? AUMFolderError.accessDenied.localizedDescription
+            status = .failed(why)
+            await report(to: client, error: why)
             return
         }
 
-        // Diff and act.
-        let plan = makePlan(deviceFiles: deviceFiles, entries: entries)
-        var pushes = 0, pulls = 0, failures = 0
-        for (path, action) in plan {
+        // Diff.
+        var listing: [String: AUMFolderFile] = [:]
+        var device: [AUMSyncDeviceFile] = []
+        for file in deviceFiles {
+            let path = AUMSyncDiff.normalize(file.relativePath)
+            guard listing[path] == nil else { continue }
+            listing[path] = file
+            device.append(syncFile(file, path: path, folder: folder))
+        }
+        var controller: [String: AUMSessionEntry] = [:]
+        for entry in entries {
+            let path = AUMSyncDiff.normalize(entry.path)
+            if controller[path] == nil { controller[path] = entry }
+        }
+        let plan = AUMSyncDiff.plan(
+            device: device,
+            controller: controller.map { Self.controllerFile($0.value, path: $0.key) },
+            index: index,
+            held: Set(states.filter { $0.value == .conflict }.keys))
+        if plan.index != index {
+            index = plan.index
+            persist()
+        }
+        let known = Set(plan.actions.map(\.path))
+        inbox = inbox.filter { known.contains($0.path) }
+        refused = refused.filter { known.contains($0.key) }
+
+        var copies: [(path: String, action: AUMSyncAction)] = []
+        var next: [String: AUMFileSyncState] = [:]
+        for (path, action) in plan.actions {
             switch action {
             case .none:
-                if states[path]?.isWorking != true { states[path] = nil }
+                break
             case .conflict:
-                states[path] = .conflict
-            case .push(let file):
-                states[path] = .pushing
-                status = .syncing("pushing \(pushes + 1)…")
-                if await push(file, client: client, folder: folder) { pushes += 1 } else { failures += 1 }
-            case .pull(let entry, let updatesExisting):
-                states[path] = .pulling
-                status = .syncing("pulling \(pulls + 1)…")
-                if await pull(entry, updatesExisting: updatesExisting, client: client, folder: folder) {
-                    pulls += 1
+                next[path] = .conflict
+            case .unlisted(let alias):
+                next[path] = .error(Self.unlistedText(alias: alias))
+            case .push:
+                if let no = refused[path], let file = listing[path], no.bytes == file.bytes,
+                   !AUMSyncDiff.modifiedMoved(file.modified?.timeIntervalSince1970, no.modified) {
+                    // The controller refused this very file. It stays an
+                    // error until the file changes.
+                    next[path] = .error(no.text)
                 } else {
-                    failures += 1
+                    next[path] = .pushing
+                    copies.append((path, action))
                 }
+            case .pull:
+                next[path] = .pulling
+                copies.append((path, action))
             }
         }
+        states = next
+
+        // Copy. The controller hears what is queued before the first byte moves.
+        if !copies.isEmpty {
+            status = .syncing("\(copies.count) to copy…")
+            await report(to: client)
+        }
+        var pushes = 0, pulls = 0
+        let planned = Date()
+        for copy in copies {
+            guard generation == self.generation else { return }
+            // A plan this old was made before the app was suspended, or the
+            // copies before this one were slow. The controller's side may have
+            // moved on since its manifest: start over with a fresh one. What
+            // is left stays queued.
+            if Date().timeIntervalSince(planned) > Self.planLifetime {
+                if pendingKick == nil {
+                    pendingKick = (client: client, folder: folder)
+                }
+                break
+            }
+            // The listing is as old as this cycle, and earlier copies took
+            // their time. Look at the file again: if it is no longer what the
+            // plan saw (AUM saved it meanwhile), do not copy over the change.
+            let entry = controller[copy.path]
+            let relativePath = listing[copy.path]?.relativePath ?? entry?.path ?? copy.path
+            let now = folder.file(atRelativePath: relativePath)
+            let again = AUMSyncDiff.decide(
+                device: now.map { syncFile($0, path: copy.path, folder: folder) },
+                controller: entry.map { Self.controllerFile($0, path: copy.path) },
+                index: index[copy.path])
+            guard again.action == copy.action else {
+                switch again.action {
+                case .none:
+                    states[copy.path] = nil
+                    index[copy.path] = again.index
+                    persist()
+                case .conflict:
+                    states[copy.path] = .conflict
+                default:
+                    // Another copy than the planned one: the next cycle's.
+                    // The row and the report keep the file as queued.
+                    break
+                }
+                continue
+            }
+            switch copy.action {
+            case .push:
+                guard let file = now else { continue }
+                status = .syncing("pushing \(pushes + 1)…")
+                if await push(file, listed: entry != nil, client: client, folder: folder) { pushes += 1 }
+            case .pull(let updatesExisting):
+                guard let entry = entry else { continue }
+                status = .syncing("pulling \(pulls + 1)…")
+                if await pull(entry, replacing: now, updatesExisting: updatesExisting, client: client, folder: folder) {
+                    pulls += 1
+                }
+            default:
+                break
+            }
+        }
+        guard generation == self.generation else { return }
         if pulls > 0 {
             refreshDeviceFiles(folder)
         }
-        pruneIndex()
-        persist()
 
-        if failures > 0 {
-            status = .failed("\(failures) file\(failures == 1 ? "" : "s") failed to sync")
+        let failed = states.values.filter(\.isError).count
+        if failed > 0 {
+            status = .failed("\(failed) file\(failed == 1 ? "" : "s") failed to sync")
         } else {
             status = .synced(files: deviceFiles.count, at: Date())
         }
+        await report(to: client)
     }
 
-    /// Diff one snapshot of both sides against the index into per-file actions.
-    private func makePlan(deviceFiles: [AUMFolderFile], entries: [AUMSessionEntry]) -> [(String, SyncAction)] {
-        let device = Dictionary(uniqueKeysWithValues: deviceFiles.map { (normalize($0.relativePath), $0) })
-        let controller = Dictionary(entries.map { (normalize($0.path), $0) }, uniquingKeysWith: { a, _ in a })
-
-        var plan: [(String, SyncAction)] = []
-        for path in Set(device.keys).union(controller.keys).sorted() {
-            // A conflict the user has not resolved yet stays a conflict; the
-            // diff must not silently flip it back to a copy.
-            if states[path] == .conflict, device[path] != nil, controller[path] != nil {
-                plan.append((path, .conflict))
-                continue
-            }
-            plan.append((path, action(path: path, device: device[path], controller: controller[path])))
+    /// The diff's view of a device file. Its bytes are read only when the diff
+    /// needs them: the date moved while the size stayed.
+    private func syncFile(_ file: AUMFolderFile, path: String, folder: AUMFolderBookmark) -> AUMSyncDeviceFile {
+        var out = AUMSyncDeviceFile(
+            path: path, bytes: file.bytes,
+            modified: file.modified?.timeIntervalSince1970,
+            isMidiMap: file.isMidiMap)
+        if AUMSyncDiff.needsContentCheck(out, index: index[path]), let data = try? folder.read(file) {
+            out.contentHash = ContentHash.sha256(data)
         }
-        return plan
+        return out
     }
 
-    private func action(path: String, device: AUMFolderFile?, controller: AUMSessionEntry?) -> SyncAction {
-        switch (device, controller) {
-        case (nil, nil):
-            return .none
+    private static func controllerFile(_ entry: AUMSessionEntry, path: String) -> AUMSyncControllerFile {
+        AUMSyncControllerFile(path: path, bytes: entry.bytes, modified: entry.modified)
+    }
 
-        case (let file?, nil):
-            // Device-only. Mirror it to the controller — also the v1 "deletion
-            // does not propagate" path: a controller-side delete is restored
-            // from the surviving device copy. Midimaps cannot be uploaded
-            // (the controller's upload route validates a session graph), so
-            // they stay device-only without complaint.
-            if file.isMidiMap {
-                index.removeValue(forKey: path)
-                return .none
-            }
-            return .push(file)
-
-        case (nil, let entry?):
-            // Controller-only: a freshly authored/edited file (or a device-side
-            // delete being restored — deletions don't propagate in v1).
-            return .pull(entry, updatesExisting: false)
-
-        case (let file?, let entry?):
-            guard let idx = index[path] else {
-                // Both sides exist but we never synced them (first run after
-                // linking, or a fresh install). Equal sizes are taken as the
-                // same file; different sizes are a conflict — bootstrapping
-                // must not silently overwrite either side.
-                if file.bytes == entry.bytes {
-                    index[path] = fingerprint(file: file, entry: entry)
-                    return .none
-                }
-                return .conflict
-            }
-            let deviceChanged = fingerprintChanged(file: file, against: idx)
-            let controllerChanged = entry.modified != idx.controllerModified || entry.bytes != idx.controllerBytes
-            switch (deviceChanged, controllerChanged) {
-            case (false, false):
-                return .none
-            case (true, true):
-                return .conflict
-            case (true, false):
-                return file.isMidiMap ? .none : .push(file)
-            case (false, true):
-                return .pull(entry, updatesExisting: true)
-            }
+    private static func unlistedText(alias: String?) -> String {
+        if let alias = alias {
+            return "the controller keeps this file as \"\(alias)\" — it cannot hold both names"
         }
+        return "the controller took this file but does not list it — not sent again until it changes"
     }
 
     // MARK: - Copy primitives
 
     /// Upload one device file to the controller at its relative path,
-    /// recording the new both-side fingerprint on success.
-    private func push(_ file: AUMFolderFile, client: DaemonClient, folder: AUMFolderBookmark) async -> Bool {
-        let path = normalize(file.relativePath)
+    /// recording the new both-side fingerprint on success. `file` is the file
+    /// as it is now, not as a listing saw it; `listed` says whether the
+    /// controller's manifest has the path.
+    private func push(_ file: AUMFolderFile, listed: Bool, client: DaemonClient, folder: AUMFolderBookmark) async -> Bool {
+        let path = AUMSyncDiff.normalize(file.relativePath)
+        let generation = self.generation
         do {
             let data = try folder.read(file)
             _ = try await client.uploadAUMSession(
                 data: data, filename: file.name, relativePath: file.relativePath, modified: file.modified)
+            guard generation == self.generation else { return false }
             // The receiver preserves the modified time we sent (Chtimes), so
             // the manifest will echo the device mtime back — record exactly
-            // what the next manifest fetch will show. Both byte counts come
-            // from the data actually pushed: if the file changed between
-            // enumeration and read, the next cycle re-detects it.
+            // what the next manifest fetch will show. Both byte counts and the
+            // hash come from the data actually pushed: if the file changed
+            // after it was looked at, the next cycle re-detects it.
             index[path] = AUMSyncIndexEntry(
                 deviceModified: file.modified?.timeIntervalSince1970,
                 deviceBytes: data.count,
                 controllerModified: file.modified.map { DaemonClient.rfc3339.string(from: $0) } ?? "",
-                controllerBytes: data.count
+                controllerBytes: data.count,
+                contentHash: ContentHash.sha256(data),
+                controllerListed: listed
             )
+            manifestIsStale = true
+            refused[path] = nil
             states[path] = nil
+            persist()
             return true
         } catch {
-            states[path] = .error(friendly(error))
+            guard generation == self.generation else { return false }
+            let text = friendly(error)
+            if case DaemonError.notOK(let code, _) = error, (400..<500).contains(code) {
+                refused[path] = (file.bytes, file.modified?.timeIntervalSince1970, text)
+            }
+            states[path] = .error(text)
             return false
         }
     }
 
     /// Download one controller file into the AUM folder at its relative path,
-    /// recording the fingerprint on success. `noteInbox` queues an inbox item
-    /// too — off for conflict resolution, where the user just chose this copy
-    /// and an "updated from controller" arrival would only be noise.
-    private func pull(_ entry: AUMSessionEntry, updatesExisting: Bool, noteInbox: Bool = true, client: DaemonClient, folder: AUMFolderBookmark) async -> Bool {
-        let path = normalize(entry.path)
+    /// recording the fingerprint on success. `current` is the device's file
+    /// there now, if any. `noteInbox` queues an inbox item too — off for
+    /// conflict resolution, where the user just chose this copy and an
+    /// "updated from controller" arrival would only be noise.
+    private func pull(_ entry: AUMSessionEntry, replacing current: AUMFolderFile?, updatesExisting: Bool,
+                      noteInbox: Bool = true, client: DaemonClient, folder: AUMFolderBookmark) async -> Bool {
+        let path = AUMSyncDiff.normalize(entry.path)
+        let generation = self.generation
         do {
             let (data, _) = try await client.downloadAUMSession(path: entry.path)
+            guard generation == self.generation else { return false }
+            let hash = ContentHash.sha256(data)
+            // The device has these very bytes already (the controller staged
+            // them again, or they are the ones this app uploaded): leave the
+            // file alone. AUM may have it open, and nothing arrived.
+            if let current = current, current.bytes == data.count,
+               let have = try? folder.read(current), have == data {
+                index[path] = AUMSyncIndexEntry(
+                    deviceModified: current.modified?.timeIntervalSince1970,
+                    deviceBytes: data.count,
+                    controllerModified: entry.modified,
+                    controllerBytes: entry.bytes,
+                    contentHash: hash,
+                    controllerListed: true
+                )
+                states[path] = nil
+                persist()
+                return true
+            }
             // Write at the entry's own relative location — never AUM's root —
             // keeping the device tree a true mirror of the staged tree.
             let dest = try folder.write(data: data, filename: entry.filename, subfolder: entry.subfolder)
-            // Fingerprint the file as written (its fresh mtime), so the next
-            // cycle sees it unchanged.
+            // Fingerprint the file as written, so the next cycle sees it
+            // unchanged. The date is read by path: the URL just written
+            // through would answer with the replaced file's (FileStamp).
             index[path] = AUMSyncIndexEntry(
-                deviceModified: folder.modificationDate(of: dest)?.timeIntervalSince1970,
+                deviceModified: folder.stamp(of: dest)?.modified?.timeIntervalSince1970,
                 deviceBytes: data.count,
                 controllerModified: entry.modified,
-                controllerBytes: entry.bytes
+                controllerBytes: entry.bytes,
+                contentHash: hash,
+                controllerListed: true
             )
             states[path] = nil
             inbox.removeAll { $0.path == path }
             if noteInbox {
                 inbox.insert(AUMInboxItem(path: path, updated: updatesExisting, date: Date()), at: 0)
             }
+            persist()
             return true
         } catch {
+            guard generation == self.generation else { return false }
             states[path] = .error(friendly(error))
             return false
         }
@@ -368,41 +483,81 @@ final class AUMSyncEngine: ObservableObject {
     // MARK: - Conflict resolution
 
     /// Resolve a conflict by copying the chosen side over the other. The row's
-    /// "keep device / keep controller" buttons land here.
+    /// "keep device / keep controller" buttons land here. It waits for a
+    /// running cycle: the cycle's plan was made before the choice, and the two
+    /// would copy the same file past each other.
     func resolveConflict(path: String, keepDevice: Bool, client: DaemonClient?, folder: AUMFolderBookmark) async {
         guard let client = client else { return }
-        let norm = normalize(path)
+        while isSyncing {
+            await withCheckedContinuation { waiting.append($0) }
+        }
+        isSyncing = true
+        defer { finish() }
+
+        let norm = AUMSyncDiff.normalize(path)
+        // The cycle that just ended may have found the two sides equal again.
+        guard states[norm] == .conflict else { return }
         if keepDevice {
-            guard let file = deviceFiles.first(where: { normalize($0.relativePath) == norm }) else {
+            guard let file = folder.file(atRelativePath: path) else {
                 states[norm] = .error("device copy disappeared — rescan")
                 return
             }
             states[norm] = .pushing
-            _ = await push(file, client: client, folder: folder)
+            _ = await push(file, listed: true, client: client, folder: folder)
         } else {
-            guard let entry = lastManifest?.entries.first(where: { normalize($0.path) == norm }) else {
+            guard let entry = lastManifest?.entries.first(where: { AUMSyncDiff.normalize($0.path) == norm }) else {
                 states[norm] = .error("controller copy disappeared — refresh")
                 return
             }
             states[norm] = .pulling
-            if await pull(entry, updatesExisting: true, noteInbox: false, client: client, folder: folder) {
+            let current = folder.file(atRelativePath: path)
+            if await pull(entry, replacing: current, updatesExisting: true, noteInbox: false, client: client, folder: folder) {
                 refreshDeviceFiles(folder)
             }
         }
         persist()
+        await report(to: client)
+    }
+
+    // MARK: - Report to the controller
+
+    /// Tell the controller what the sync made of each file (and how far the
+    /// audio units' sync is). Best effort: a report that does not arrive is
+    /// followed by the next cycle's.
+    private func report(to client: DaemonClient, error: String? = nil) async {
+        guard reportRefusedBy != client.baseURL else { return }
+        let report = AUMSyncReport(
+            app: Self.appVersion,
+            rev: lastManifest?.rev ?? 0,
+            states: states,
+            index: index,
+            error: error,
+            audioUnits: audioUnitProgress())
+        do {
+            try await client.sendAUMSyncReport(report)
+        } catch DaemonError.notOK(let code, _) where code == 404 || code == 405 {
+            // A daemon from before the report. Ask again after the next start.
+            reportRefusedBy = client.baseURL
+        } catch {
+        }
+    }
+
+    private static var appVersion: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        return "auv3-probe \(v)"
     }
 
     // MARK: - View helpers
 
     /// The live sync state for a file's relative path (synced when untracked).
     func state(forPath path: String) -> AUMFileSyncState {
-        states[normalize(path)] ?? .synced
+        states[AUMSyncDiff.normalize(path)] ?? .synced
     }
 
     /// True when `path` arrived/changed from the controller and has not been
     /// viewed or dismissed yet — drives the "new from controller" badge.
     func isInInbox(path: String) -> Bool {
-        let norm = normalize(path)
+        let norm = AUMSyncDiff.normalize(path)
         return inbox.contains { $0.path == norm }
     }
 
@@ -414,11 +569,9 @@ final class AUMSyncEngine: ObservableObject {
         let inFolder: (String) -> Bool = { path in
             prefix.isEmpty || path == prefix || path.hasPrefix(prefix + "/")
         }
-        let demandsUser: (AUMFileSyncState) -> Bool = { state in
-            if case .error = state { return true }
-            return state == .conflict
+        if states.contains(where: { inFolder($0.key) && ($0.value.isError || $0.value == .conflict) }) {
+            return true
         }
-        if states.contains(where: { inFolder($0.key) && demandsUser($0.value) }) { return true }
         return inbox.contains { inFolder($0.path) }
     }
 
@@ -441,53 +594,30 @@ final class AUMSyncEngine: ObservableObject {
 
     // MARK: - Local bookkeeping
 
-    /// Re-enumerate the device folder (used by the cycle and after external
-    /// changes like a controller-side delete the user expects mirrored away).
-    func refreshDeviceFiles(_ folder: AUMFolderBookmark) {
+    /// Re-enumerate the device folder. False when a linked folder could not be
+    /// listed; the browser then keeps showing the last listing.
+    @discardableResult
+    func refreshDeviceFiles(_ folder: AUMFolderBookmark) -> Bool {
         guard folder.isBound else {
             deviceFiles = []
-            return
+            folderProblem = nil
+            return true
         }
-        deviceFiles = (try? folder.listFiles()) ?? []
-    }
-
-    /// Drop index entries (and stale error states) for files gone from BOTH
-    /// sides, so explicit deletes don't leave ghosts behind.
-    private func pruneIndex() {
-        let known = Set(deviceFiles.map { normalize($0.relativePath) })
-            .union((lastManifest?.entries ?? []).map { normalize($0.path) })
-        index = index.filter { known.contains($0.key) }
-        states = states.filter { known.contains($0.key) }
-        inbox = inbox.filter { known.contains($0.path) }
-    }
-
-    private func fingerprint(file: AUMFolderFile, entry: AUMSessionEntry) -> AUMSyncIndexEntry {
-        AUMSyncIndexEntry(
-            deviceModified: file.modified?.timeIntervalSince1970,
-            deviceBytes: file.bytes,
-            controllerModified: entry.modified,
-            controllerBytes: entry.bytes
-        )
-    }
-
-    private func fingerprintChanged(file: AUMFolderFile, against idx: AUMSyncIndexEntry) -> Bool {
-        if file.bytes != idx.deviceBytes { return true }
-        // Compare mtimes at 1-second granularity: the wire format (RFC3339)
-        // carries whole seconds, so finer differences are round-trip noise.
-        let current = file.modified?.timeIntervalSince1970
-        switch (current, idx.deviceModified) {
-        case (nil, nil): return false
-        case (let a?, let b?): return abs(a - b) >= 1
-        default: return true
+        do {
+            deviceFiles = try folder.listFiles()
+            folderProblem = nil
+            return true
+        } catch {
+            folderProblem = error.localizedDescription
+            return false
         }
     }
 
-    /// AUMFolderFile.relativePath and AUMSessionEntry.path are both
-    /// slash-separated already; normalize defensively so map keys line up.
-    private func normalize(_ path: String) -> String {
-        path.split(separator: "/").joined(separator: "/")
-    }
-
+    /// Save the index and the inbox. Called after every copy, not once per
+    /// cycle: iPadOS suspends the app the moment another one comes to the
+    /// front (the controller opens AUM as soon as a session is fetched) and
+    /// may drop it there. A fetch whose index entry was lost that way read as
+    /// "both sides changed" at the next start.
     private func persist() {
         let defaults = UserDefaults.standard
         if let data = try? JSONEncoder().encode(index) {

@@ -129,7 +129,9 @@ final class AUMFolderBookmark: ObservableObject {
                 includingPropertiesForKeys: keys,
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
             ) else {
-                return []
+                // Not an empty folder: a cycle that took it for one would
+                // fetch every file of the controller over the device's.
+                throw AUMFolderError.accessDenied
             }
             let rootPath = folder.standardizedFileURL.path
 
@@ -209,14 +211,33 @@ final class AUMFolderBookmark: ObservableObject {
         }
     }
 
-    /// The current modification date of a file inside the bound folder (e.g.
-    /// one just written), read under the folder's security scope. Best-effort:
-    /// nil when the folder or file is inaccessible.
-    func modificationDate(of url: URL) -> Date? {
-        let values = try? withFolder { _ in
-            try url.resourceValues(forKeys: [.contentModificationDateKey])
+    /// The size and modification date a file inside the bound folder has now
+    /// (one just written, say), read under the folder's security scope; nil
+    /// when the folder or the file cannot be reached. It is read by path: the
+    /// URL a file was just written through still answers with the replaced
+    /// file's date (see `FileStamp`).
+    func stamp(of url: URL) -> FileStamp? {
+        try? withFolder { _ in FileStamp.read(atPath: url.path) }
+    }
+
+    /// The file at `relativePath` as it is now, nil when there is none. A sync
+    /// cycle looks again with this before it copies: its listing is as old as
+    /// the cycle.
+    func file(atRelativePath relativePath: String) -> AUMFolderFile? {
+        try? withFolder { folder -> AUMFolderFile? in
+            var url = folder
+            for segment in relativePath.split(separator: "/") {
+                url.appendPathComponent(String(segment))
+            }
+            guard let stamp = FileStamp.read(atPath: url.path) else { return nil }
+            return AUMFolderFile(
+                url: url,
+                name: url.lastPathComponent,
+                relativePath: relativePath,
+                bytes: stamp.bytes,
+                modified: stamp.modified
+            )
         }
-        return values?.contentModificationDate
     }
 
     // MARK: - Bookmark plumbing

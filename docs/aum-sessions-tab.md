@@ -90,11 +90,32 @@ flowchart LR
 ## Sync model
 
 - **Index-based mirror, newest wins.** The app persists a sync index
-  (relative path → mtime, size, last-synced rev). Each cycle: enumerate the
-  device folder, fetch the controller manifest, diff against the index. One
-  side changed → copy to the other; both changed → conflict badge (no silent
-  overwrite); deletions do **not** propagate in v1 (explicit delete actions
-  remain).
+  (relative path → both sides' date and size, and the SHA-256 of the bytes, at
+  the last sync). Each cycle: enumerate the device folder, fetch the controller
+  manifest, diff against the index. One side changed → copy to the other; both
+  changed → conflict badge (no silent overwrite); deletions do **not**
+  propagate in v1 (explicit delete actions remain). The diff is
+  `AUMSyncDiff` in ProbeKit, a pure function with its own tests.
+- **The app's own writes are not changes.** A file whose date moved while its
+  size stayed is read, and only other bytes make it changed: a write by the
+  app, a restore or a copy all move a date. After a fetch the app reads the
+  new file's date by path, never from the `URL` it wrote through (after an
+  atomic write over an existing file that URL still answers with the replaced
+  file's date, see `FileStamp`). A fetch whose bytes the device already has
+  does not touch the file. The index is saved after every copy, because
+  iPadOS suspends the app as soon as another one comes to the front.
+- **A cycle looks twice.** Its listing is as old as the cycle. Right before a
+  copy the app looks at the file again and leaves it to the next cycle if it
+  is no longer what the plan saw. Picking a side of a conflict waits for the
+  running cycle instead of copying beside it.
+- **An upload the controller does not list is sent once.** If the controller
+  takes a file and its next manifest does not list the path (its file system
+  folds case and holds the file under another spelling, say), the row says so
+  and the file is not sent again until it changes. So is an upload the
+  controller refuses.
+- **The controller is told.** After every cycle the app reports the files in
+  conflict, in error and in flight, and the number in sync:
+  [aum-sync-report.md](aum-sync-report.md).
 - **Triggers**: daemon becomes reachable, app foreground, tab appears, and a
   lightweight poll while foregrounded. This replaces the current once-per-host
   `autoSync` in
