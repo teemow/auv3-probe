@@ -21,6 +21,8 @@
 #   tree [app]            print the accessibility tree (labels + positions)
 #   status                tunnel / disk image / WebDriverAgent state
 #   unlock [--dry-run]    type the passcode on the lock screen (asks for it; one try)
+#   passcode [--dry-run]  type the passcode into an app's passcode prompt in front,
+#                         such as Settings > Face ID & Code (asks for it; one try)
 #   buy <app id or URL> [--confirm-name <name> --confirm-price <price>]
 #                         show an App Store app's name, developer and price; with
 #                         the person's confirmation, buy or get it (scripts/ipad-buy)
@@ -433,6 +435,7 @@ case "${1:-}" in
     -h|--help|help|"") usage; exit 0 ;;
     # Needs WebDriverAgent only, not go-ios.
     unlock) shift; IPAD_WDA_URL="${IPAD_WDA_URL:-$WDA_URL}" exec "$(dirname "$0")/ipad-unlock" "$@" ;;
+    passcode) shift; IPAD_WDA_URL="${IPAD_WDA_URL:-$WDA_URL}" exec "$(dirname "$0")/ipad-passcode" "$@" ;;
     buy) shift; IPAD_WDA_URL="${IPAD_WDA_URL:-$WDA_URL}" exec "$(dirname "$0")/ipad-buy" "$@" ;;
 esac
 need ios

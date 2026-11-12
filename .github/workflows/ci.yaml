@@ -17,6 +17,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Test purchase progress reporting
+        run: python3 -m unittest discover -s Tests/Scripts -p 'test_ipad_buy.py' -v
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
