@@ -9,10 +9,11 @@
 #       script would refuse. Taps nothing that buys or downloads.
 #   ipad-buy <app id or URL> --confirm-name <name> --confirm-price <price>
 #       Buy (or get, or re-download) exactly that app: tap its price, Get or
-#       re-download button once, confirm Apple's purchase sheet once when it
-#       shows that app and that price, enter the Apple ID password once when
-#       the sheet asks for it (see below), then wait until the app is
-#       installed.
+#       re-download button once, then read Apple's sheet from the accessibility
+#       tree and say what the person has to do (press the top button twice,
+#       Face ID, a password, a sign-in), with a progress line for each step
+#       (sheet open, confirmed, downloading, installed). It stops early when
+#       the sheet closes without a purchase or shows an error.
 #
 # --confirm-price takes the price exactly as the look prints it ("22,99 €",
 # "$9.99"), `free` for a free app, or `redownload` for an app bought before.
@@ -24,18 +25,20 @@
 # confirmed that app and that total in their own words, for this purchase.
 # An earlier approval does not carry over to another app or another price.
 #
-# The Apple ID password, like the passcode in ipad-unlock, comes only from a
-# person at the script's own terminal prompt: when the sheet asks for it, the
-# script asks for it on the terminal (not shown), types it into the sheet and
-# presses Return. It is not echoed, not stored, not logged and never taken
-# from an argument, the environment, a file or a pipe, and an agent never
-# types, stores or passes it. The script makes ONE attempt: when the sheet
-# asks again, it stops, because Apple locks an account after wrong
-# passwords. It stops, leaving the sheet as it is, on anything else: Face ID
-# or Touch ID, a double-click of the top button (only a person at the iPad
-# can do those), a verification code, or a sheet it cannot read. It never
-# buys in-app purchases or subscriptions and changes no account, payment,
-# password or App Store setting.
+# Only a person at the iPad can press the top button twice, use Face ID or
+# Touch ID, or type a verification code: the script says so and waits for it
+# (Apple closes the sheet after about a minute; the script then reports that
+# nothing was bought). When the sheet asks for the Apple ID password, and only
+# then, the script asks for it at its own terminal prompt (not shown), like
+# the passcode in ipad-unlock, types it into the sheet and presses Return;
+# Return alone leaves it to be typed on the iPad. The password is not echoed,
+# stored or logged and never taken from an argument, the environment, a file
+# or a pipe, and an agent never types, stores or passes it. ONE attempt: when
+# the sheet asks again, the script stops, because Apple locks an account after
+# wrong passwords. It taps the sheet's own Buy or Install button once, only
+# when the sheet shows that app (and price). It never buys in-app purchases or
+# subscriptions and changes no account, payment, password or App Store
+# setting. The Apple Account shown on the sheet is left out of what it prints.
 #
 # The bundle id the install check waits for, and a cross-check of name and
 # price, come from Apple's public lookup (itunes.apple.com/lookup), which is
@@ -84,15 +87,23 @@ IAP_WORDS = ("in-app purchases", "in-app-käufe", "achats intégrés", "compras 
 YES_WORDS = {"yes", "ja", "oui", "sí", "si"}
 SUBSCRIPTION = re.compile(r"abo|subscri|arcade|trial|testen|monat|month|jahr|year|woche|week",
                           re.IGNORECASE)
-# Texts of the purchase and authentication sheets.
-# The purchase sheet's own confirm button, and what asks for the person.
+# Texts of the purchase and authentication sheets, read from the accessibility
+# tree after the tap. The sheet's own confirm button:
 CONFIRM_WORDS = {"kaufen", "buy", "purchase", "installieren", "install", "acheter", "comprar",
                  "acquista", "installer", "instalar", "installa"}
-BIOMETRIC = re.compile(r"face id|touch id|doppel|double.?click|seitentaste|side button|top button|"
-                       r"obere taste", re.IGNORECASE)
-AUTH = re.compile(r"passwor|kennwort|face id|touch id|doppel|double.?click|anmelden|sign in|"
-                  r"apple[- ]?(id|account)|apple-account|bezahl|pay|kaufen|buy|install",
-                  re.IGNORECASE)
+# Apple's double-press of the top button ("Mit Taste bestätigen", banner "Zum
+# Zahlen zweimal drücken"; "Confirm with Side Button", "Double-click to pay").
+DOUBLE_PRESS = re.compile(r"zweimal|doppel|double.?(click|press)|twice|mit taste bestätigen|"
+                          r"confirm with (the )?(side|top) button|seitentaste|obere taste|"
+                          r"side button|top button|deux fois|dos veces|due volte", re.IGNORECASE)
+BIOMETRIC = re.compile(r"face id|touch id", re.IGNORECASE)
+CODE = re.compile(r"code", re.IGNORECASE)
+SIGN_IN = re.compile(r"\banmelden\b|\bsign in\b|\bse connecter\b|iniciar sesión|accedi", re.IGNORECASE)
+ERROR = re.compile(r"fehlgeschlagen|\bfailed\b|konnte nicht|could not|couldn.t|nicht abgeschlossen|"
+                   r"cannot be completed|abgelehnt|declined|nicht möglich|not possible|"
+                   r"nicht verfügbar|not available|\bfehler\b|\berror\b", re.IGNORECASE)
+SHEET = re.compile(r"kaufen|\bbuy\b|einmalige gebühr|one.time|purchase|installieren|\binstall\b|"
+                   r"apple[- ]?account", re.IGNORECASE)
 
 
 class Refusal(Exception):
@@ -441,50 +452,105 @@ def front_bundle():
     return v.get("bundleId") or ""
 
 
-class Sheet:
-    """What Apple's purchase or sign-in sheet shows, wherever it is drawn: in
-    the App Store (outside its product page) or in the app in front."""
+def ipad_locked():
+    return call("GET", "/wda/locked", timeout=10).get("value") is True
 
-    def __init__(self, store):
-        self.texts, self.secure, self.fields, self.confirm = [], [], [], []
-        self.session = None
+
+SPRINGBOARD = "com.apple.springboard"
+CLOCK = re.compile(r"^\d{1,2}[:.]\d{2}( ?[ap]\.?m\.?)?$", re.IGNORECASE)   # the status bar's time
+EMAIL = re.compile(r"[^\s@,;:]+@[^\s@,;:]+\.[a-z]{2,}", re.IGNORECASE)
+
+
+def private(t):
+    """A sheet text for the terminal, with the Apple Account taken out: an
+    agent may run this, and the account is nobody else's business."""
+    t = " ".join(unicodedata.normalize("NFKC", t or "").split())
+    if re.match(r"(apple[- ]?)?(account|konto|id)\b", t, re.IGNORECASE) and ":" in t:
+        return t.split(":", 1)[0] + ": (hidden)"
+    return EMAIL.sub("(hidden)", t)
+
+
+class Screen:
+    """What the iPad shows besides the product page: Apple's purchase sheet,
+    a sign-in, an alert, SpringBoard's banner. Read through the one session
+    `s` (WebDriverAgent keeps a single session: a second one would end the
+    first), pointed in turn at the App Store, SpringBoard and the app in
+    front, and pointed back at the App Store at the end."""
+
+    def __init__(self, s):
+        self.texts, self.alerts = [], []
+        self.secure = self.fields = self.confirm = []
+        self.where = None          # bundle that holds the fields and buttons
         front = front_bundle()
-        targets = [(store, STORE)]
-        # Some sheets are drawn by another process (a SpringBoard alert, a
-        # system service), which is then the app in front.
-        if front and front != STORE:
-            other = Session(None)
-            other.read_app(front)
-            targets.append((other, front))
-        for s, bundle in targets:
-            for n, parents in walk(s.source()):
-                if any(ident(p) == "AppStore.productPage" for p in parents) or ident(n).startswith("AppStore."):
-                    continue
-                l = label(n)
-                if l and n.get("type") in ("StaticText", "Button", "TextView", "Link") and l not in self.texts:
-                    self.texts.append(l)
-            secure = s.find("type == 'XCUIElementTypeSecureTextField'")
-            fields = s.find("type == 'XCUIElementTypeTextField'")
-            confirm = []
-            for eid in s.find("type == 'XCUIElementTypeButton' AND NOT (name BEGINSWITH 'AppStore.')"):
-                l = s.get(f"/element/{eid}/attribute/label").get("value") or ""
-                if norm(l) in CONFIRM_WORDS:
-                    confirm.append(eid)
-            if secure or confirm or (fields and bundle != STORE):
-                self.session, self.secure, self.fields, self.confirm = s, secure, fields, confirm
-        for s, bundle in targets[1:]:
-            if s is not self.session:
-                s.close()
+        bundles = [STORE, SPRINGBOARD] + ([front] if front and front not in (STORE, SPRINGBOARD) else [])
+        try:
+            for bundle in bundles:
+                s.read_app(bundle)
+                for n, parents in walk(s.source()):
+                    if any(ident(p) == "AppStore.productPage" for p in parents) or ident(n).startswith("AppStore."):
+                        continue
+                    l = label(n)
+                    if n.get("type") == "Alert" and l:
+                        self.alerts.append(l)
+                    if l and n.get("type") in ("StaticText", "Button", "TextView", "Link", "Alert", "Other") \
+                            and l not in self.texts and not CLOCK.match(l):
+                        self.texts.append(l)
+                # Fields and buttons by query: the JSON tree may leave out an
+                # empty field's type.
+                secure = s.find("type == 'XCUIElementTypeSecureTextField'")
+                # The App Store's own search field is no sign-in.
+                fields = s.find("type == 'XCUIElementTypeTextField' AND NOT (name BEGINSWITH 'AppStore.')"
+                                " AND NOT (type == 'XCUIElementTypeSearchField')"
+                                " AND NOT (name CONTAINS[c] 'search' OR name CONTAINS[c] 'such'"
+                                " OR placeholderValue CONTAINS[c] 'search' OR placeholderValue CONTAINS[c] 'such')")
+                words = ", ".join(json.dumps(w) for w in sorted(CONFIRM_WORDS))
+                confirm = s.find("type == 'XCUIElementTypeButton' AND NOT (name BEGINSWITH 'AppStore.')"
+                                 f" AND label IN[c] {{{words}}}")
+                if (secure or fields or confirm) and self.where is None:
+                    self.where, self.secure, self.fields, self.confirm = bundle, secure, fields, confirm
+        finally:
+            s.read_app(STORE)
 
-    def close(self, store):
-        if self.session is not None and self.session is not store:
-            self.session.close()
-
-    def biometric(self):
-        return [t for t in self.texts if BIOMETRIC.search(t)]
+    def any(self, pattern):
+        return [t for t in self.texts if pattern.search(t)]
 
     def shows(self, text):
         return norm(text) in norm(" | ".join(self.texts))
+
+    def state(self):
+        """What the screen asks for, most specific first."""
+        if self.any(ERROR) or [a for a in self.alerts if ERROR.search(a)]:
+            return "error"
+        if self.secure:
+            return "password"
+        if self.fields and self.any(CODE):
+            return "code"
+        if self.fields or self.any(SIGN_IN):
+            return "sign-in"
+        if self.any(DOUBLE_PRESS):
+            return "double-press"
+        if self.any(BIOMETRIC):
+            return "biometric"
+        if self.confirm:
+            return "confirm"
+        if self.any(SHEET):
+            return "sheet"
+        return None
+
+
+# What the person has to do, in plain words, for each state of the sheet.
+TODO = {
+    "double-press": "ON THE IPAD: press the top button (the power button) twice, quickly, to pay. "
+                    "Apple lets only a person at the iPad do this; nothing from this desk can. The "
+                    "sheet waits about a minute, then closes without buying.",
+    "biometric": "ON THE IPAD: confirm with Face ID or Touch ID. Only a person at the iPad can do this.",
+    "code": "ON THE IPAD: type the verification code Apple sent into the sheet. This script does "
+            "not type codes.",
+    "sign-in": "ON THE IPAD: sign in to the App Store in the sheet. This script does not type "
+               "account names.",
+    "password-iPad": "ON THE IPAD: type the Apple ID password into the sheet (this run has no "
+                     "terminal to ask at).",
+}
 
 
 def ask_password():
@@ -493,23 +559,19 @@ def ask_password():
         return None
     import getpass
     try:
-        return getpass.getpass("Apple ID password, used only if the purchase sheet asks for it "
-                               "(not shown; Return alone for none): ")
+        return getpass.getpass("The sheet asks for the Apple ID password. Type it here (not shown; "
+                               "Return alone to type it on the iPad instead): ")
     except (EOFError, KeyboardInterrupt):
         return ""
 
 
-def enter_password(sheet, pw):
+def enter_password(s, screen, pw):
     """Type the person's password into the sheet once and press Return.
     Returns a message when it stopped before anything was submitted."""
-    if len(sheet.secure) != 1:
-        return f"the sheet has {len(sheet.secure)} password fields, not one. Nothing was typed."
-    if pw is None:
-        return ("the App Store asks for the Apple ID password, and this script asks for it only "
-                "on a terminal: the person runs this command in a terminal. Nothing was typed.")
-    if not pw:
-        return "no password given. Nothing was typed."
-    s, field = sheet.session, sheet.secure[0]
+    if len(screen.secure) != 1:
+        return f"the sheet has {len(screen.secure)} password fields, not one. Nothing was typed."
+    field = screen.secure[0]
+    s.read_app(screen.where)
     try:
         s.post(f"/element/{field}/click", {})
         time.sleep(0.4)
@@ -524,6 +586,7 @@ def enter_password(sheet, pw):
         s.post("/wda/keys", {"value": ["\n"]})
     finally:
         del pw
+        s.read_app(STORE)
     return None
 
 
@@ -542,6 +605,10 @@ def tap_offer(s, page):
     raise Refusal("the button seen on the page could not be found again to tap it. Nothing was tapped.")
 
 
+def stamp(start):
+    return f"[{int(time.time() - start):>3} s]"
+
+
 def buy(app_id, entry, page_read, args):
     bundle = entry["bundleId"]
     if installed(bundle) is None:
@@ -552,84 +619,154 @@ def buy(app_id, entry, page_read, args):
         if (page.title, page.offer, page.notices) != (page_read.title, page_read.offer, page_read.notices):
             raise Refusal(f"the page changed between reading and tapping ({shown(page.title)}, {shown(page.offer[1]) if page.offer else 'none'}). "
                           "Nothing was tapped.")
-        # Asked before the tap: the App Store does not keep the iPad awake, so
-        # the sheet must not wait for someone typing. Used only if the sheet
-        # asks for it, and only once.
-        password = ask_password()
-        if password is not None and not password:
-            say("no password given: if the sheet asks for one, the script stops there")
-            password = ""
         tap_offer(s, page)
-        say(f"tapped {shown(page.offer[1])} once; waiting up to {args.timeout} s for {bundle}")
-        kind = offer_kind(*page.offer)
-        deadline = time.time() + args.timeout
-        told = None
-        confirmed = typed = False
-        while time.time() < deadline:
-            time.sleep(3)
-            # iOS lists an app while it still downloads, so the page's button
-            # has to read Open as well.
-            now = Page()
-            now.read_top(s.source())
-            if installed(bundle) and now.offer and now.offer[0] == "open":
-                say(f"installed: {page.title} ({bundle})")
-                return True
-            sheet = Sheet(s)
-            try:
-                relevant = sheet.session is not None or sheet.biometric()
-                if relevant and sheet.texts != told:
-                    told = sheet.texts
-                    say("the App Store shows:")
-                    for t in sheet.texts[:12]:
-                        say(f"  {t}")
-                if sheet.secure:
-                    if typed:
-                        say("the sheet asks for the password again: it was not accepted. This script does "
-                            "not try again, because Apple locks an account after wrong passwords. The "
-                            "sheet is left as it is.")
-                        return False
-                    stop = enter_password(sheet, password)
-                    password = None
-                    if stop:
-                        say(stop + " The sheet is left as it is.")
-                        return False
-                    typed = True
-                    say("password entered once; waiting for the App Store")
-                elif sheet.fields:
-                    say("the sheet asks for something typed that is not a password (a verification code?). "
-                        "A person has to do this step on the iPad; the sheet is left as it is.")
-                    return False
-                elif sheet.biometric():
-                    say("the sheet waits for Face ID, Touch ID or a double-click of the top button. Only a "
-                        "person at the iPad can do that; nothing from this desk can. The sheet is left as "
-                        "it is. (To buy from here, the person sets the App Store to ask for the password "
-                        "instead, in the iPad's Settings; this script never changes settings.)")
-                    return False
-                elif sheet.confirm and not confirmed:
-                    want = page.title if kind == "redownload" else page.offer[1] if kind == "price" else None
-                    if len(sheet.confirm) != 1:
-                        say(f"the sheet has {len(sheet.confirm)} buttons that could confirm, not one. Nothing "
-                            "was tapped on it; the sheet is left as it is.")
-                        return False
-                    if not sheet.shows(page.title) or (want and not sheet.shows(want)):
-                        say(f"the sheet does not show {shown(page.title)}"
-                            + (f" and {shown(want)}" if want else "")
-                            + ". Nothing was tapped on it; the sheet is left as it is.")
-                        return False
-                    res = sheet.session.post(f"/element/{sheet.confirm[0]}/click", {})
-                    if isinstance(res.get("value"), dict) and res["value"].get("error"):
-                        say("the tap on the sheet's button failed; the sheet is left as it is.")
-                        return False
-                    confirmed = True
-                    say("confirmed the purchase sheet once (it showed this app"
-                        + (" and this price" if kind == "price" else "") + ")")
-            finally:
-                sheet.close(s)
-        say(f"timed out after {args.timeout} s: {bundle} is not installed. Look at the iPad: a sheet "
-            "may still wait for the person, or the download is still running.")
-        return False
+        start = time.time()
+        say(f"{stamp(start)} tapped {shown(page.offer[1])} once; reading what the iPad shows "
+            f"(Ctrl-C stops this script, not the purchase)")
+        return follow(s, page, bundle, args, start)
     finally:
         s.close()
+
+
+def follow(s, page, bundle, args, start):
+    """Watch the sheet and the page after the tap, say what the person must
+    do, and report each step until the app is installed or it is clear that
+    it will not be."""
+    kind = offer_kind(*page.offer)
+    deadline = start + args.timeout
+    seen_sheet = confirmed = typed = asked = warned = False
+    last_state, last_texts, last_offer = "start", None, page.offer
+    quiet_since = said_at = start
+    gone = 0                   # reads in a row without a sheet, after one was seen
+    while time.time() < deadline:
+        time.sleep(1.5)
+        now = time.time()
+        if now - said_at >= 20:
+            said_at = now
+            say(f"{stamp(start)} still waiting: " + (
+                {"double-press": "for the double-press of the top button on the iPad",
+                 "biometric": "for Face ID or Touch ID on the iPad",
+                 "password": "for the password on the iPad",
+                 "code": "for the verification code on the iPad",
+                 "sign-in": "for the sign-in on the iPad",
+                 "locked": "the iPad is locked; for the install",
+                 "sheet": "the purchase sheet is open",
+                 "confirm": "the purchase sheet is open"}.get(last_state)
+                or ("downloading" if confirmed else "for a purchase sheet")))
+        if ipad_locked():
+            if last_state != "locked":
+                say(f"{stamp(start)} the iPad has locked its screen; a confirmed purchase still "
+                    f"downloads. Waiting for {bundle} (the sheet cannot be read while it is locked).")
+                last_state = "locked"
+            if installed(bundle):
+                say(f"{stamp(start)} installed: {page.title} ({bundle})")
+                return True
+            continue
+        top = Page()
+        top.read_top(s.source())
+        is_in = installed(bundle)
+        if is_in and top.offer and top.offer[0] == "open":
+            say(f"{stamp(start)} installed: {page.title} ({bundle})")
+            return True
+        if top.offer and top.offer != last_offer:
+            say(f"{stamp(start)} the app's button now reads {shown(top.offer[1])} (state {top.offer[0]})"
+                + ("; the purchase went through, downloading" if top.offer != page.offer else ""))
+            if top.offer != page.offer:
+                seen_sheet = confirmed = True
+            last_offer = top.offer
+        screen = Screen(s)
+        state = screen.state()
+        if screen.texts != last_texts and (state or seen_sheet):
+            last_texts = screen.texts
+            if state:
+                say(f"{stamp(start)} the iPad shows:")
+                for t in screen.texts[:14]:
+                    say(f"    {private(t)}")
+        if state:
+            seen_sheet = True
+            quiet_since = now
+        if state == "error":
+            say(f"{stamp(start)} the App Store reports a problem: "
+                + "; ".join(private(t) for t in (screen.any(ERROR) or screen.alerts)[:3])
+                + ". Nothing more is tapped; the iPad is left as it is.")
+            return False
+        if state == "password":
+            if typed:
+                say(f"{stamp(start)} the sheet asks for the password again: it was not accepted. This "
+                    "script does not try again, because Apple locks an account after wrong passwords. "
+                    "The sheet is left as it is.")
+                return False
+            if not asked:
+                asked = True
+                pw = ask_password()
+                if pw:
+                    stop = enter_password(s, screen, pw)
+                    pw = None
+                    if stop:
+                        say(f"{stamp(start)} {stop} The sheet is left as it is.")
+                        return False
+                    typed = True
+                    say(f"{stamp(start)} password entered once; waiting for the App Store")
+                else:
+                    say(f"{stamp(start)} {TODO['password-iPad']}")
+            last_state = state
+            continue
+        if state == "confirm" and not confirmed:
+            want = page.title if kind == "redownload" else page.offer[1] if kind == "price" else None
+            if len(screen.confirm) != 1:
+                say(f"{stamp(start)} the sheet has {len(screen.confirm)} buttons that could confirm, not "
+                    "one. Nothing was tapped on it; the sheet is left as it is.")
+                return False
+            if not screen.shows(page.title) or (want and not screen.shows(want)):
+                say(f"{stamp(start)} the sheet does not show {shown(page.title)}"
+                    + (f" and {shown(want)}" if want else "")
+                    + ". Nothing was tapped on it; the sheet is left as it is.")
+                return False
+            s.read_app(screen.where)
+            try:
+                res = s.post(f"/element/{screen.confirm[0]}/click", {})
+            finally:
+                s.read_app(STORE)
+            if isinstance(res.get("value"), dict) and res["value"].get("error"):
+                say(f"{stamp(start)} the tap on the sheet's button failed; the sheet is left as it is.")
+                return False
+            confirmed = True
+            say(f"{stamp(start)} confirmed the purchase sheet once (it showed this app"
+                + (" and this price" if kind == "price" else "") + ")")
+        elif state in TODO and state != last_state:
+            say(f"{stamp(start)} {TODO[state]}")
+        elif state == "sheet" and last_state != "sheet":
+            say(f"{stamp(start)} the purchase sheet is open")
+        if state is None and seen_sheet and last_state not in ("start", None, "locked"):
+            gone += 1
+            if gone < 2 or (top.offer is None and not is_in):
+                continue     # the sheet may be animating, the page not readable yet
+            if top.offer == page.offer and not is_in:
+                # Back to the price button without a download: the sheet closed.
+                say(f"{stamp(start)} the sheet has closed and the app's button reads "
+                    f"{shown(top.offer[1])} again: nothing was bought (cancelled on the iPad, or "
+                    "Apple's time to confirm ran out). Run the command again with the person at "
+                    "the iPad.")
+                return False
+            confirmed = True
+            say(f"{stamp(start)} the sheet has closed; the app is downloading")
+        gone = 0
+        last_state = state
+        if not seen_sheet and now - quiet_since > 45 and not warned:
+            warned = True
+            say(f"{stamp(start)} no purchase sheet and no download this script can read, 45 s after "
+                "the tap. The iPad shows:")
+            for t in (screen.texts or ["(nothing this script can read)"])[:14]:
+                say(f"    {private(t)}")
+            say("Look at the iPad: a sheet there is one this script does not know yet (please report "
+                "it); do what it asks. This script watches for the download for another 75 s.")
+        if not seen_sheet and now - quiet_since > 120:
+            say(f"{stamp(start)} no purchase sheet and no download 120 s after the tap: stopping. "
+                "If nothing shows on the iPad, nothing was bought.")
+            return False
+    say(f"timed out after {args.timeout} s: {bundle} is not installed. Look at the iPad: a sheet "
+        "may still wait for the person, or the download is still running.")
+    return False
 
 
 # --- Lock and the iPad's state ---------------------------------------------

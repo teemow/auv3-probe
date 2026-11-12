@@ -231,17 +231,45 @@ With the confirmations the script
    know (a trial, Arcade, a second offer button), on a notice next to the offer
    ("not compatible with this device"), and on anything it cannot read (developer,
    in-app purchases);
-2. in a terminal, asks for the Apple ID password (not shown; Return alone for
-   none), before it taps, because the App Store does not keep the iPad awake and the
-   sheet must not wait for someone typing;
-3. reopens the page, checks that it still shows the same, and taps the price, Get
+2. reopens the page, checks that it still shows the same, and taps the price, Get
    or re-download button of that app once, found by its identifier and position
    (never another app's button from the "you might also like" shelves);
-4. follows Apple's sheet: it taps the sheet's Buy or Install button once if the
-   sheet shows that app (and, for a paid app, that price), and when the sheet asks
-   for the password it types the one given at the prompt and presses Return, once;
-5. waits (`--timeout`, default 600 s) until `ios apps` lists the bundle id and the
-   page's button reads Open, and reports.
+3. reads what the iPad shows from the accessibility tree (the App Store,
+   SpringBoard and whatever is in front) and prints, with the seconds since the
+   tap, what the person has to do and each step: the sheet is open, the sheet
+   waits for a double-press of the top button, Face ID, a password or a
+   sign-in, the purchase went through, the app is downloading, it is
+   installed, and a "still waiting" line at least every 20 s;
+4. taps the sheet's Buy or Install button once if the sheet shows that app (and,
+   for a paid app, that price), and, when the sheet asks for the password, asks
+   for it at its terminal prompt then (not before), types it and presses Return,
+   once;
+5. stops early, with a message, when the sheet closes and the app's button reads
+   the price again (nothing was bought), when the App Store shows an error, and
+   when no sheet and no download appear within 120 s of the tap (at 45 s it
+   prints what the iPad shows and asks the person to look); otherwise it waits (`--timeout`, default 600 s) until
+   `ios apps` lists the bundle id and the page's button reads Open.
+
+```text
+[  1 s] tapped "7,99 €" once; reading what the iPad shows (Ctrl-C stops this script, not the purchase)
+[  4 s] the iPad shows:
+    App kaufen
+    Example Synth
+    7,99 €
+    Account: (hidden)
+    Mit Taste bestätigen
+[  4 s] ON THE IPAD: press the top button (the power button) twice, quickly, to pay. ...
+[ 12 s] the app's button now reads "Wird geladen" (state downloading); the purchase went through, downloading
+[ 31 s] installed: Example Synth (com.example.synth)
+```
+
+**Most purchases need a person at the iPad.** An iPad with Face ID or Touch ID
+confirms a purchase with a double-press of the top button ("Zum Zahlen zweimal
+drücken") and then Face ID, or Touch ID, or the passcode. Apple lets nothing but
+a person do that: no script and no agent can press the button. The script says so
+and waits; Apple closes the sheet after about a minute, and the script then reports
+that nothing was bought. An agent running the command tells the person to be at the
+iPad first.
 
 **The password comes only from a person at the script's own prompt**, as the
 passcode does for `unlock`. It is not echoed, stored or logged, and never taken
@@ -250,16 +278,17 @@ does not ask and stops at the sheet. An agent never asks for it in chat and neve
 types, stores or passes it: it asks the person to run the buy command in a terminal
 on the host the iPad is plugged into. The script makes **one** attempt: when the
 sheet asks again, it stops, because Apple locks an account after wrong passwords.
+Return alone at the prompt leaves the password to be typed on the iPad.
 
-It stops and leaves the sheet as it is on anything else: Face ID, Touch ID or a
-double-click of the top button (only a person at the iPad can do those: an iPad
-that confirms purchases with Face ID has to be set, by its owner in Settings, to
-ask for the password before a purchase can be finished from here), a verification
-code, a sheet without exactly one Buy or Install button, or a sheet that does not
-show the app and its price. It never buys in-app purchases or subscriptions and
-changes no account, payment, password or App Store setting. The sheet's layout was
-not yet seen live when this was written; the script prints what the sheet shows,
-so a refusal says what it found.
+It does not type a verification code or an account name: it says that the person
+does that step on the iPad and waits. It stops and leaves the sheet as it is on a
+sheet without exactly one Buy or Install button, or one that does not show the app
+and its price. It never buys in-app purchases or subscriptions and changes no
+account, payment, password or App Store setting. The Apple Account the sheet shows
+is printed as "(hidden)". WebDriverAgent keeps a single session, so the script
+reads SpringBoard and the other apps through the App Store's session (by pointing
+its `defaultActiveApplication` at them), never by opening a second one, which
+would end the first.
 
 It needs WebDriverAgent and the tunnel, and an unlocked iPad. It takes the lock
 directory `~/.cache/go-ios/ipad.lock` like `unlock` does; a caller that holds the
