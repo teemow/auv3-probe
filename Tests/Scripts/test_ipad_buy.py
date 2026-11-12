@@ -348,6 +348,19 @@ class BundlePurchaseTests(FollowTestCase):
         self.assertTrue(any("timed out" in line for line in self.messages))
 
 
+class PrivateTests(unittest.TestCase):
+    def test_the_account_line_with_the_holders_name_is_hidden_whole(self):
+        # As seen live on the password sheet: "<name>, <address>".
+        self.assertEqual(buy.private("Example Person, someone@example.com"), "(account hidden)")
+
+    def test_an_address_inside_a_sentence_is_hidden_alone(self):
+        self.assertEqual(
+            buy.private("Gib das Passwort für someone@example.com ein, um diese Transaktion zu autorisieren."),
+            "Gib das Passwort für (hidden) ein, um diese Transaktion zu autorisieren.")
+        self.assertEqual(buy.private("Account: someone@example.com"), "Account: (hidden)")
+        self.assertEqual(buy.private("App-Paket kaufen"), "App-Paket kaufen")
+
+
 class ScreenTests(unittest.TestCase):
     def test_the_confirm_query_compares_each_word_without_in(self):
         # WebDriverAgent matched nothing with `label IN[c] {...}` on the live

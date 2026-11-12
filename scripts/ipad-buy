@@ -633,7 +633,8 @@ def listed(bundles):
 def finished(top, apps):
     """Whether the page proves the install: the app's button reads Open, or,
     for a bundle, the row of every app in it does (the bundle's own button
-    never reads Open)."""
+    never reads Open: after the purchase it reads "Gekauft", state
+    purchased)."""
     if not apps:
         return bool(top.offer) and top.offer[0] == "open"
     rows = getattr(top, "children", None) or {}
@@ -660,6 +661,11 @@ def private(t):
     t = " ".join(unicodedata.normalize("NFKC", t or "").split())
     if re.match(r"(apple[- ]?)?(account|konto|id)\b", t, re.IGNORECASE) and ":" in t:
         return t.split(":", 1)[0] + ": (hidden)"
+    # The password sheet names the account as "<holder's name>, <address>":
+    # the name is as much the account as the address.
+    parts = [p.strip() for p in t.split(",")]
+    if len(parts) > 1 and any(EMAIL.fullmatch(p) for p in parts):
+        return "(account hidden)"
     return EMAIL.sub("(hidden)", t)
 
 
@@ -869,7 +875,8 @@ def follow(s, page, target, args, start):
             say(f"{stamp(start)} still waiting: " + (
                 {"double-press": "for the double-press of the top button on the iPad",
                  "biometric": "for Face ID or Touch ID on the iPad",
-                 "password": "for the password on the iPad",
+                 "password": ("for the App Store to take the password" if typed
+                              else "for the password on the iPad"),
                  "code": "for the verification code on the iPad",
                  "sign-in": "for the sign-in on the iPad",
                  "locked": "unlock the iPad so installation can be verified",
