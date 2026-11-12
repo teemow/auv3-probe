@@ -225,7 +225,8 @@ only the script's output, never the keystrokes.
 ### Getting an app from the App Store
 
 `scripts/ipad buy` opens an app's page in the App Store on the iPad and reads it;
-with the person's confirmation it buys or downloads that one app:
+with the person's confirmation it buys or downloads that one app (or one App Store
+bundle of apps, [below](#an-app-store-bundle)):
 
 ```bash
 scripts/ipad buy 1234567890                  # or https://apps.apple.com/<cc>/app/<name>/id1234567890
@@ -372,6 +373,81 @@ the front. The page is read from the accessibility tree: the top lockup's
 subtitle (In-App Purchases), and the Information section's in-app purchases row,
 which the script scrolls to. Button words are matched for English and German, and for French, Spanish
 and Italian for the common buttons; where a word is not known it refuses rather than guesses.
+
+#### An App Store bundle
+
+A bundle (several apps from one developer at one price, a URL with `/app-bundle/`)
+is looked at and bought the same way, as one purchase with one confirmation: the
+bundle's name and price.
+
+```bash
+scripts/ipad buy https://apps.apple.com/de/app-bundle/example-bundle/id1234567890
+#   bundle:      1234567890 (an App Store bundle of 2 apps, one purchase)
+#   name:        Example Bundle
+#   price:       29,99 €   (button: "29,99 €")
+#   apps in it:
+#     Example Synth: 22,99 € alone (button "22,99 €"), bundle id com.example.synth, in-app purchases: no
+#     Example Drums: 12,99 € alone (button "12,99 €"), bundle id com.example.drums, in-app purchases: no
+#   bundle page: Example Bundle by Example Audio, 29,99 € (the apps alone: 35,98 €)
+#   to buy it, after the person who pays has confirmed this bundle and this price:
+#     scripts/ipad buy https://apps.apple.com/de/app-bundle/id1234567890 --confirm-name 'Example Bundle' --confirm-price '29,99 €'
+```
+
+A bare id that Apple's lookup does not know is tried as a bundle. What differs
+from a single app:
+
+- **Where the cross-check comes from.** Apple's lookup has no entry for a bundle.
+  The bundle's name, price, developer and apps come from Apple's public web page of
+  the bundle (`apps.apple.com/<cc>/app-bundle/id<id>`, the data its web app renders
+  from), which is sent the id and the country and nothing else. Each app in the
+  bundle is then looked up by its id, and the lookup's name and bundle id must
+  match the bundle page's.
+- **What the iPad shows.** The bundle page lists its apps as rows
+  (`AppStore.shelfItem.smallLockup[id=<app id>,parentId=bundleChildren,…]`, "2 Apps
+  in diesem Paket"), each with its own button. The script refuses when the rows are
+  not exactly the apps of Apple's bundle page.
+- **Only at the bundle's price, only while none of its apps is had.** When the
+  person has bought or installed one of the apps already, the App Store asks a
+  reduced "complete my bundle" price that no public source confirms, so the script
+  refuses and says to get the other apps one by one. A bundle bought before is not
+  re-downloaded as a bundle either.
+- **When it is done.** The bundle's own button never reads Open: after the
+  purchase it reads "Gekauft" (state `purchased`). The script waits until `ios
+  apps` lists every app of the bundle and every app's row on the bundle page
+  reads Open, and reports each row's progress on the way. "Nothing was bought"
+  needs the bundle's button and every row as before the tap and none of the apps
+  listed.
+
+Tested end to end on iPadOS 27 for a two-app bundle, with Face ID off for
+purchases and the password typed at the script's prompt:
+
+```text
+[  0 s] tapped "29,99 €" once; reading what the iPad shows (Ctrl-C stops this script, not the purchase)
+[  4 s] the bundle's button now reads "Download vorbereiten" (state loading); the App Store waits for the purchase sheet
+[  8 s] the iPad shows:
+    Example Bundle 4+
+    App-Paket kaufen
+    29,99 €
+    Einmalige Gebühr
+    Account: (hidden)
+[  8 s] confirmed the purchase sheet once (it showed this bundle and this price)
+[ 17 s] the iPad shows:
+    Gib das Passwort für (hidden) ein, um diese Transaktion zu autorisieren.
+    (account hidden)
+    Bestätigen
+The sheet asks for the Apple ID password. Type it here (not shown; Return alone to type it on the iPad instead):
+[ 33 s] password entered once; waiting for the App Store
+[ 47 s] the sheet has closed; the bundle is downloading
+[ 50 s] the bundle's button now reads "Gekauft" (state purchased); the purchase went through, downloading
+[ 50 s] "Example Synth" now reads "Wird geladen: 19,2 MB von 122,8 MB (5 MB/Sek.)" (state downloading)
+[ 62 s] "Example Drums" now reads "Öffnen" (state open)
+[ 68 s] installed: Example Bundle (com.example.drums, com.example.synth)
+```
+
+The sheet's Buy button (on the "App-Paket kaufen" sheet) is tapped only when
+the sheet shows the bundle's name and price; otherwise the script stops and
+leaves the sheet to the person. The password sheet names the account as "<name>,
+<address>"; the script prints that line as "(account hidden)".
 
 ## App notes
 
