@@ -107,6 +107,12 @@ SIGN_IN = re.compile(r"\banmelden\b|\bsign in\b|\bse connecter\b|iniciar sesión
 ERROR = re.compile(r"fehlgeschlagen|\bfailed\b|konnte nicht|could not|couldn.t|nicht abgeschlossen|"
                    r"cannot be completed|abgelehnt|declined|nicht möglich|not possible|"
                    r"nicht verfügbar|not available|\bfehler\b|\berror\b", re.IGNORECASE)
+# After the password, Apple asks once whether later purchases need it too
+# ("Passwort für weitere Käufe auf diesem Gerät erfordern?"). The script
+# answers only with the stricter choice, "always": it never turns the
+# password off for later purchases.
+ALWAYS_ASK = re.compile(r"weitere käufe|additional purchases|further purchases", re.IGNORECASE)
+ALWAYS_WORDS = {"immer anfordern", "always require"}
 SHEET = re.compile(r"kaufen|\bbuy\b|einmalige gebühr|one.time|purchase|installieren|\binstall\b|"
                    r"apple[- ]?account", re.IGNORECASE)
 
@@ -484,7 +490,8 @@ class Screen:
 
     def __init__(self, s):
         self.texts, self.alerts = [], []
-        self.secure = self.fields = self.confirm = []
+        self.secure = self.fields = self.confirm = self.always = []
+        self.always_where = None
         self.where = None          # bundle that holds the fields and buttons
         front = front_bundle()
         bundles = [STORE, SPRINGBOARD] + ([front] if front and front not in (STORE, SPRINGBOARD) else [])
@@ -514,6 +521,10 @@ class Screen:
                 words = " OR ".join(f"label ==[c] {json.dumps(w)}" for w in sorted(CONFIRM_WORDS))
                 confirm = s.find("type == 'XCUIElementTypeButton' AND NOT (name BEGINSWITH 'AppStore.')"
                                  f" AND ({words})")
+                always = s.find("type == 'XCUIElementTypeButton' AND ("
+                                + " OR ".join(f"label ==[c] {json.dumps(w)}" for w in sorted(ALWAYS_WORDS)) + ")")
+                if always and self.always_where is None:
+                    self.always, self.always_where = always, bundle
                 if (secure or fields or confirm) and self.where is None:
                     self.where, self.secure, self.fields, self.confirm = bundle, secure, fields, confirm
         finally:
@@ -529,6 +540,8 @@ class Screen:
         """What the screen asks for, most specific first."""
         if self.any(ERROR) or [a for a in self.alerts if ERROR.search(a)]:
             return "error"
+        if self.always and self.any(ALWAYS_ASK):
+            return "always-ask"
         if self.secure:
             return "password"
         if self.fields and self.any(CODE):
@@ -716,6 +729,24 @@ def follow(s, page, bundle, args, start):
                 + "; ".join(private(t) for t in (screen.any(ERROR) or screen.alerts)[:3])
                 + ". Nothing more is tapped; the iPad is left as it is.")
             return False
+        if state == "always-ask":
+            if len(screen.always) != 1:
+                say(f"{stamp(start)} Apple asks whether later purchases need the password, and the "
+                    f"dialog has {len(screen.always)} 'always' buttons, not one. Nothing was tapped; "
+                    "the person answers it on the iPad.")
+                return False
+            s.read_app(screen.always_where)
+            try:
+                res = s.post(f"/element/{screen.always[0]}/click", {})
+            finally:
+                s.read_app(STORE)
+            if isinstance(res.get("value"), dict) and res["value"].get("error"):
+                say(f"{stamp(start)} the tap on 'always require' failed; the dialog is left as it is.")
+                return False
+            say(f"{stamp(start)} Apple asked whether later purchases need the password: answered "
+                "'always require' (the stricter choice)")
+            last_state = state
+            continue
         if state == "password":
             if typed:
                 say(f"{stamp(start)} the sheet asks for the password again: it was not accepted. This "
