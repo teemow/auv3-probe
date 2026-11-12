@@ -20,6 +20,7 @@
 #   size [app]            window size in points (tells the orientation)
 #   tree [app]            print the accessibility tree (labels + positions)
 #   status                tunnel / disk image / WebDriverAgent state
+#   unlock [--dry-run]    type the passcode on the lock screen (asks for it; one try)
 #
 # One-time setup (go-ios, the disk image, WebDriverAgent, UI Automation) is in
 # docs/ipad-automation.md. Nothing device- or account-specific lives here: bundle
@@ -42,7 +43,7 @@ APPLE_ROOT_PEM="$GOIOS_HOME/apple-root.pem"
 die() { echo "ipad: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH (see docs/ipad-automation.md)"; }
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Run go-ios quietly: it logs JSON to stderr, which is shown only on failure.
 goios() {
@@ -427,6 +428,8 @@ cmd_status() {
 
 case "${1:-}" in
     -h|--help|help|"") usage; exit 0 ;;
+    # Needs WebDriverAgent only, not go-ios.
+    unlock) shift; IPAD_WDA_URL="${IPAD_WDA_URL:-$WDA_URL}" exec "$(dirname "$0")/ipad-unlock" "$@" ;;
 esac
 need ios
 need curl

@@ -170,6 +170,31 @@ The helper reads these overrides: `GOIOS_HOME` (identity and CA, default
 `~/.config/go-ios`), `GOIOS_CACHE` (default `~/.cache/go-ios`), `DDI_DIR`,
 `WDA_PORT` (default 8100), `PROBE_BUNDLE_ID`, and `WDA_BUNDLE_ID`.
 
+### When the iPad has locked itself
+
+The iPad locks after its auto-lock time unless the app in front keeps it awake.
+AUM does; AUv3 Probe does not, so an iPad left with the probe app in front locks
+itself. WebDriverAgent keeps running, but every gesture and app launch then
+fails (`Unable to launch … because the device was not, or could not be,
+unlocked`), and `curl -s 127.0.0.1:8100/wda/locked` answers `"value" : true`.
+
+Only the passcode unlocks it. Someone who knows it runs, in a terminal:
+
+```bash
+scripts/ipad unlock --dry-run   # wake the prompt and find its keys; types nothing
+scripts/ipad unlock             # asks for the code (not shown), types it, brings AUM to the front
+```
+
+[`scripts/ipad-unlock`](../scripts/ipad-unlock) does the work. It needs
+WebDriverAgent running, `curl` and `jq`, and it makes **one** attempt: iPadOS
+counts wrong codes and locks the device out after a few, so it types nothing
+unless the prompt is empty, the code has the prompt's length and every key it
+needs is on screen once, and it stops when a tap does not register. The code is
+read from the terminal only: an agent asks a person to run the script and never
+types, stores or passes the code itself. The script takes the lock directory
+`~/.cache/go-ios/ipad.lock` for as long as it runs and refuses while something
+else holds it (`IPAD_LOCK` overrides the path).
+
 ## App notes
 
 **AUv3 Probe:** installed under the xtool-prefixed bundle ID
@@ -240,6 +265,7 @@ top-bar positions, and the gestures that don't come through automation. To load 
 | `service 'com.apple.dt.testmanagerd.remote' is not available in RSD` | no (or an outdated) disk image mounted | set up §2, then `scripts/ipad mount-ddi` |
 | `x509: certificate signed by unknown authority` from `gs.apple.com` | Apple Root CA missing from the trust store | `scripts/ipad mount-ddi` pins and supplies it |
 | `Timed out while enabling automation mode` | UI Automation off, or iPad locked | enable it (§4), unlock, retry `scripts/ipad wda` |
+| `Unable to launch … because the device was not, or could not be, unlocked`; `/wda/locked` is true | the iPad locked itself (AUv3 Probe or SpringBoard was in front) | `scripts/ipad unlock` in a terminal, by someone who knows the passcode ([above](#when-the-ipad-has-locked-itself)) |
 | `tap` reports success, then the app is gone | WDA terminated the app when its session ended | use `scripts/ipad tap` (it sets `shouldTerminateApp: false`) |
 | `tree` shows the Home Screen, not the app | session not bound to the app (windowed multitasking) | pass the app: `scripts/ipad tree aum` |
 | `tap` reports success, nothing happens | the label is on a caption, not the button | `scripts/ipad tap-at` on the icon |
