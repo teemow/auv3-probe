@@ -303,9 +303,7 @@ final class AUMSyncEngine: ObservableObject {
             }
             // The listing is as old as this cycle, and earlier copies took
             // their time. Look at the file again: if it is no longer what the
-            // plan saw (AUM saved it meanwhile), leave it to the next cycle
-            // rather than copy over a change. Its row and the report keep it
-            // as queued until then.
+            // plan saw (AUM saved it meanwhile), do not copy over the change.
             let entry = controller[copy.path]
             let relativePath = listing[copy.path]?.relativePath ?? entry?.path ?? copy.path
             let now = folder.file(atRelativePath: relativePath)
@@ -313,7 +311,21 @@ final class AUMSyncEngine: ObservableObject {
                 device: now.map { syncFile($0, path: copy.path, folder: folder) },
                 controller: entry.map { Self.controllerFile($0, path: copy.path) },
                 index: index[copy.path])
-            guard again.action == copy.action else { continue }
+            guard again.action == copy.action else {
+                switch again.action {
+                case .none:
+                    states[copy.path] = nil
+                    index[copy.path] = again.index
+                    persist()
+                case .conflict:
+                    states[copy.path] = .conflict
+                default:
+                    // Another copy than the planned one: the next cycle's.
+                    // The row and the report keep the file as queued.
+                    break
+                }
+                continue
+            }
             switch copy.action {
             case .push:
                 guard let file = now else { continue }
