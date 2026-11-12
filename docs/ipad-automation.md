@@ -231,19 +231,35 @@ With the confirmations the script
    know (a trial, Arcade, a second offer button), on a notice next to the offer
    ("not compatible with this device"), and on anything it cannot read (developer,
    in-app purchases);
-2. reopens the page, checks that it still shows the same, and taps the price, Get
+2. in a terminal, asks for the Apple ID password (not shown; Return alone for
+   none), before it taps, because the App Store does not keep the iPad awake and the
+   sheet must not wait for someone typing;
+3. reopens the page, checks that it still shows the same, and taps the price, Get
    or re-download button of that app once, found by its identifier and position
    (never another app's button from the "you might also like" shelves);
-3. waits (`--timeout`, default 600 s) until `ios apps` lists the bundle id and the
+4. follows Apple's sheet: it taps the sheet's Buy or Install button once if the
+   sheet shows that app (and, for a paid app, that price), and when the sheet asks
+   for the password it types the one given at the prompt and presses Return, once;
+5. waits (`--timeout`, default 600 s) until `ios apps` lists the bundle id and the
    page's button reads Open, and reports.
 
-**No credential passes through the script.** It takes no Apple ID password,
-payment detail or other secret from an argument, the environment, a file or a log,
-and no session types one. When the App Store asks for authentication (a password,
-Face ID or Touch ID, a double-click of the top button, a sign-in), the script
-leaves the sheet as it is, prints what it shows, says that a person has to do this
-step on the iPad, and only waits. It never buys in-app purchases or subscriptions,
-and it changes no account, payment, password or App Store setting.
+**The password comes only from a person at the script's own prompt**, as the
+passcode does for `unlock`. It is not echoed, stored or logged, and never taken
+from an argument, the environment, a file or a pipe; without a terminal the script
+does not ask and stops at the sheet. An agent never asks for it in chat and never
+types, stores or passes it: it asks the person to run the buy command in a terminal
+on the host the iPad is plugged into. The script makes **one** attempt: when the
+sheet asks again, it stops, because Apple locks an account after wrong passwords.
+
+It stops and leaves the sheet as it is on anything else: Face ID, Touch ID or a
+double-click of the top button (only a person at the iPad can do those: an iPad
+that confirms purchases with Face ID has to be set, by its owner in Settings, to
+ask for the password before a purchase can be finished from here), a verification
+code, a sheet without exactly one Buy or Install button, or a sheet that does not
+show the app and its price. It never buys in-app purchases or subscriptions and
+changes no account, payment, password or App Store setting. The sheet's layout was
+not yet seen live when this was written; the script prints what the sheet shows,
+so a refusal says what it found.
 
 It needs WebDriverAgent and the tunnel, and an unlocked iPad. It takes the lock
 directory `~/.cache/go-ios/ipad.lock` like `unlock` does; a caller that holds the
