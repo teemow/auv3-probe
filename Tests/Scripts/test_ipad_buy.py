@@ -79,9 +79,6 @@ class PurchaseProgressTests(unittest.TestCase):
         self.assertTrue(any("nothing was bought" in line for line in self.messages))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     def test_loading_button_while_sheet_waits_is_no_purchase(self):
         # As seen live: the button reads "Download vorbereiten" (state loading)
         # as soon as the sheet opens; the sheet then runs out unconfirmed.
@@ -113,3 +110,73 @@ if __name__ == "__main__":
             self.assertTrue(self.follow())
         self.assertTrue(any("confirmed the purchase sheet once" in line for line in self.messages))
         self.session.post.assert_any_call("/element/e1/click", {})
+
+    def test_always_require_question_is_answered_with_always_only(self):
+        # As seen live after the password: "Passwort für weitere Käufe auf
+        # diesem Gerät erfordern?" with "Nach 15 Minuten anfordern" and
+        # "Immer anfordern"; the script taps only the latter.
+        dialog = SimpleNamespace(texts=["Passwort für weitere Käufe auf diesem Gerät erfordern?"],
+                                 state=lambda: "always-ask", always=["a1"],
+                                 always_where=buy.STORE)
+        self.session.post.return_value = {"value": None}
+        with patch.object(buy, "ipad_locked", return_value=False), \
+                patch.object(buy, "installed", side_effect=[False, True]), \
+                patch.object(buy, "Page", side_effect=[
+                    self.top(("loading", "Download vorbereiten")), self.top(("open", "Öffnen"))]), \
+                patch.object(buy, "Screen", side_effect=[dialog]):
+            self.assertTrue(self.follow())
+        self.session.post.assert_any_call("/element/a1/click", {})
+        self.assertTrue(any("always require" in line for line in self.messages))
+
+    def test_always_require_question_with_two_candidates_taps_nothing(self):
+        dialog = SimpleNamespace(texts=["Passwort für weitere Käufe auf diesem Gerät erfordern?"],
+                                 state=lambda: "always-ask", always=["a1", "a2"],
+                                 always_where=buy.STORE)
+        with patch.object(buy, "ipad_locked", return_value=False), \
+                patch.object(buy, "installed", return_value=False), \
+                patch.object(buy, "Page", return_value=self.top(self.page.offer)), \
+                patch.object(buy, "Screen", side_effect=[dialog]):
+            self.assertFalse(self.follow())
+        self.assertFalse(any(c.args[0].endswith("/click") for c in self.session.post.call_args_list))
+
+
+class ScreenTests(unittest.TestCase):
+    def test_the_confirm_query_compares_each_word_without_in(self):
+        # WebDriverAgent matched nothing with `label IN[c] {...}` on the live
+        # sheet; its "Kauf" button was found with one comparison per word.
+        session = Mock()
+        session.source.return_value = {}
+        session.find.return_value = []
+        with patch.object(buy, "front_bundle", return_value=buy.STORE):
+            buy.Screen(session)
+        queries = [c.args[0] for c in session.find.call_args_list]
+        confirm = [q for q in queries if "kauf" in q]
+        self.assertTrue(confirm)
+        self.assertNotIn(" IN", confirm[0])
+        self.assertIn('label ==[c] "kauf"', confirm[0])
+
+
+class PasswordPromptTests(unittest.TestCase):
+    def tty(self):
+        return patch.object(buy.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+    def test_an_empty_answer_is_asked_once_more(self):
+        with self.tty(), patch.object(buy.sys, "stdout", SimpleNamespace(isatty=lambda: True)), \
+                patch("getpass.getpass", side_effect=["", "pw"]) as ask:
+            self.assertEqual(buy.ask_password(), "pw")
+        self.assertEqual(ask.call_count, 2)
+
+    def test_two_empty_answers_leave_it_to_the_ipad(self):
+        with self.tty(), patch.object(buy.sys, "stdout", SimpleNamespace(isatty=lambda: True)), \
+                patch("getpass.getpass", side_effect=["", ""]):
+            self.assertEqual(buy.ask_password(), "")
+
+    def test_no_terminal_asks_nothing(self):
+        with patch.object(buy.sys, "stdin", SimpleNamespace(isatty=lambda: False)), \
+                patch("getpass.getpass") as ask:
+            self.assertIsNone(buy.ask_password())
+        ask.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

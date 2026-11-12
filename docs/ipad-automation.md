@@ -294,21 +294,48 @@ With the confirmations the script
 [ 31 s] installed: Example Synth (com.example.synth)
 ```
 
-**Most purchases need a person at the iPad.** An iPad with Face ID or Touch ID
-confirms a purchase with a double-press of the top button ("Zum Zahlen zweimal
-drücken") and then Face ID, or Touch ID, or the passcode. Apple lets nothing but
-a person do that: no script and no agent can press the button. The script says so
-and waits; Apple closes the sheet after about a minute, and the script then reports
-that nothing was bought. An agent running the command tells the person to be at the
-iPad first.
+**The double-press needs a person at the iPad; the password does not.** With Face
+ID or Touch ID turned on for purchases, the iPad confirms a purchase with a
+double-press of the top button ("Zum Zahlen zweimal drücken") and then Face ID, or
+Touch ID, or the passcode. Only a person at the iPad can do that: no script and no
+agent can press the button. The script says so and waits. Apple closes the sheet
+after about a minute, and the script then reports that nothing was bought.
 
 AssistiveTouch does not change that. Tried on iPadOS 27 with AssistiveTouch on
 (Settings > Accessibility > Touch > AssistiveTouch): WebDriverAgent can tap its
 floating button and open its menu, but neither the menu (with the sheet open: the
 top level, Device and Device > More) nor the list of custom actions offers a
 double-click, and the sheet kept "Zum Zahlen zweimal drücken" until it closed
-unpaid. The menu is not in any accessibility tree either. So a purchase that asks
-for the double-press cannot be finished remotely; leave AssistiveTouch off.
+unpaid. The menu is not in any accessibility tree either.
+
+**To buy without anyone at the iPad**, the person who owns it turns off Face ID
+for purchases once: Settings > Face ID & Code > "Use Face ID for" > "iTunes & App
+Store" ("Face ID verwenden für" > "iTunes & App Store"). Settings asks for the
+passcode first; `scripts/ipad passcode` types it from the person's own prompt
+([above](#a-passcode-prompt-inside-an-app)). Only that switch changes; turning it
+back on is the person's call. With it off, the purchase sheet (SpringBoard's,
+button `pay-now`, "Kauf") has a plain button that the script taps once after
+checking app and price, and then asks for the Apple ID password, which the person
+types at the script's prompt. After the first password Apple asks once whether
+later purchases need it too ("Passwort für weitere Käufe auf diesem Gerät
+erfordern?"). The script answers only "Immer anfordern" (Always Require), the
+stricter choice, and never the 15-minute option. Tested end to end on iPadOS 27.2
+for a paid app: tap, Kauf, password, the question, download, installed, in about
+a minute.
+
+A person who is not at the desk's own terminal can reach the prompts through a
+terminal multiplexer session an agent starts on the host, as for `passcode`:
+
+```bash
+tmux new-session -d -s ipad 'scripts/ipad unlock && scripts/ipad buy 1234567890 --confirm-name "Example Synth" --confirm-price "9,99 €"'
+tmux attach -t ipad    # the person: the code, then the password; Ctrl-b d detaches
+```
+
+Two things learned live. The person has to be at the prompt within a few minutes
+of the tap: the App Store does not keep the iPad awake, and once it locks the
+password can no longer be typed (the script then clears the field and sends
+nothing). And attaching can deliver a stray Return, so an empty answer is asked
+once more before the script leaves the password to the iPad.
 
 While the sheet is open the app's button already reads "Download vorbereiten"
 (state `loading`). That says nothing about payment: the script reports a purchase
@@ -322,13 +349,15 @@ does not ask and stops at the sheet. An agent never asks for it in chat and neve
 types, stores or passes it: it asks the person to run the buy command in a terminal
 on the host the iPad is plugged into. The script makes **one** attempt: when the
 sheet asks again, it stops, because Apple locks an account after wrong passwords.
-Return alone at the prompt leaves the password to be typed on the iPad.
+Return alone at the prompt (asked twice, since attaching a terminal can send one)
+leaves the password to be typed on the iPad.
 
 It does not type a verification code or an account name: it says that the person
 does that step on the iPad and waits. It stops and leaves the sheet as it is on a
 sheet without exactly one Buy or Install button, or one that does not show the app
 and its price. It never buys in-app purchases or subscriptions and changes no
-account, payment, password or App Store setting. The Apple Account the sheet shows
+account, payment, password or App Store setting beyond answering Apple's own
+question with "always require". The Apple Account the sheet shows
 is printed as "(hidden)". WebDriverAgent keeps a single session, so the script
 reads SpringBoard and the other apps through the App Store's session (by pointing
 its `defaultActiveApplication` at them), never by opening a second one, which

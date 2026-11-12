@@ -30,17 +30,22 @@
 # the double-press: its menu has no double-click action for the purchase
 # sheet, tried on iPadOS 27): the script says so and waits for it
 # (Apple closes the sheet after about a minute; the script then reports that
-# nothing was bought). When the sheet asks for the Apple ID password, and only
+# nothing was bought). With Face ID turned off for "iTunes & App Store" the
+# sheet has a plain Buy button instead and then asks for the password, so a
+# purchase needs nobody at the iPad (docs/ipad-automation.md). When Apple then
+# asks whether later purchases need the password too, the script answers only
+# "always require". When the sheet asks for the Apple ID password, and only
 # then, the script asks for it at its own terminal prompt (not shown), like
 # the passcode in ipad-unlock, types it into the sheet and presses Return;
-# Return alone leaves it to be typed on the iPad. The password is not echoed,
+# Return alone (asked twice) leaves it to be typed on the iPad. The password is not echoed,
 # stored or logged and never taken from an argument, the environment, a file
 # or a pipe, and an agent never types, stores or passes it. ONE attempt: when
 # the sheet asks again, the script stops, because Apple locks an account after
 # wrong passwords. It taps the sheet's own Buy or Install button once, only
 # when the sheet shows that app (and price). It never buys in-app purchases or
 # subscriptions and changes no account, payment, password or App Store
-# setting. The Apple Account shown on the sheet is left out of what it prints.
+# setting (beyond answering Apple's own question with "always require").
+# The Apple Account shown on the sheet is left out of what it prints.
 #
 # The bundle id the install check waits for, and a cross-check of name and
 # price, come from Apple's public lookup (itunes.apple.com/lookup), which is
